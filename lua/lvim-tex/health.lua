@@ -12,6 +12,8 @@
 local config = require("lvim-tex.config")
 local root_mod = require("lvim-tex.root")
 local rules = require("lvim-tex.log.rules")
+local viewer = require("lvim-tex.viewer")
+local synctex = require("lvim-tex.synctex")
 
 local api = vim.api
 local fn = vim.fn
@@ -190,6 +192,113 @@ local function check_config(health)
     end
 end
 
+--- THIS MACHINE's viewer matrix: every viewer the plugin knows, what state it is in here, and what
+--- it can do. A viewer story is full of one-time steps that live inside the viewer's own settings, so
+--- health is the place that must be honest about three distinct states — not implemented in this
+--- version, implemented but not installed here, and ready — rather than collapsing them into "no".
+---@param health table
+---@return nil
+local function check_viewers(health)
+    if not config.viewer.enabled then
+        health.warn("viewer.enabled = false — lvim-tex builds but never opens a viewer")
+    end
+
+    local chosen, err = viewer.resolve()
+    if chosen then
+        health.ok(
+            ("viewer in use: %s%s"):format(
+                chosen.name,
+                config.viewer.name == "auto" and (" (auto, from %s)"):format(table.concat(viewer.priority(), " → "))
+                    or " (named in config)"
+            )
+        )
+    else
+        health.error(err or "no viewer available")
+    end
+
+    -- Three states must stay distinguishable: not implemented here, implemented but unproven on this
+    -- platform, and proven. Collapsing them into ok/not-ok is what makes a viewer story untrustworthy.
+    ---@type table<string, string>
+    local PROVEN = {
+        live = "verified on this machine",
+        docs = "per the viewer's documentation; not installed here to verify",
+        platform = "per the viewer's documentation; needs its own platform to verify",
+        experimental = "EXPERIMENTAL — its D-Bus interface has not been exercised anywhere yet",
+    }
+    for _, row in ipairs(viewer.matrix()) do
+        if not row.implemented then
+            health.info(("%s — planned, not in this version"):format(row.name))
+        elseif row.available then
+            local line = ("%s — available (reload: %s, inverse: %s) · %s"):format(
+                row.name,
+                row.reload,
+                row.inverse and "yes" or "no",
+                PROVEN[row.verified] or row.verified
+            )
+            if row.verified == "live" then
+                health.ok(line)
+            else
+                health.warn(line)
+            end
+        else
+            -- The caveat belongs on an ABSENT viewer too: it is what the user is deciding about when
+            -- they consider installing it.
+            local caveat = (row.verified ~= "live") and ("  (%s)"):format(PROVEN[row.verified] or "") or ""
+            health.info(("%s — %s%s"):format(row.name, row.detail or "not found on this machine", caveat))
+        end
+    end
+end
+
+--- SyncTeX: the utility itself, whether this instance can be reached back, and the one manual step
+--- each viewer still needs. A viewer story that says "inverse search: yes" without naming the step is
+--- the reason inverse search has a reputation for never working.
+---@param health table
+---@return nil
+local function check_synctex(health)
+    local ok, detail = synctex.available()
+    if ok then
+        health.ok(("synctex (%s)"):format(config.synctex.bin))
+    else
+        health.warn(detail or "synctex is unavailable", {
+            "forward and inverse search need it; it ships with every TeX distribution",
+        })
+    end
+
+    if not config.synctex.inverse then
+        health.info("synctex.inverse = false — a click in the viewer will not move the cursor")
+        return
+    end
+
+    if not vim.v.servername or vim.v.servername == "" then
+        health.warn("this Neovim has no server socket — an external viewer cannot reach it", {
+            'started with `--listen ""`? inverse search from an external viewer needs the socket',
+        })
+    end
+
+    -- Our own page reaches the editor over lvim-preview's websocket, behind ITS gate. That gate is a
+    -- setting in lvim-preview's config, and this plugin does not write another plugin's config — so
+    -- health prints the line instead.
+    local ok_preview, prev_config = pcall(require, "lvim-preview.config")
+    if ok_preview and type(prev_config) == "table" then
+        if prev_config.artifact and prev_config.artifact.allow_client_messages then
+            health.ok("lvim-preview accepts inbound messages — ctrl-click in the page jumps here")
+        else
+            health.warn("lvim-preview's inbound-message gate is closed — ctrl-click in the page does nothing", {
+                'add `artifact = { allow_client_messages = true }` to require("lvim-preview").setup()',
+                "it stays per-artifact: only a producer that registered a handler (this one) is delivered to",
+            })
+        end
+    end
+
+    local skim = viewer.module("skim")
+    if skim and skim.available() and type(skim.inverse_setup) == "function" then
+        local setup = skim.inverse_setup()
+        health.info("Skim needs a one-time setting — Preferences → Sync → Custom:")
+        health.info(("    Command:   %s"):format(setup.command))
+        health.info(("    Arguments: %s"):format(setup.arguments))
+    end
+end
+
 --- :checkhealth lvim-tex
 ---@return nil
 function M.check()
@@ -200,6 +309,9 @@ function M.check()
     check_lsp(health)
     check_rules(health)
     check_config(health)
+    health.start("lvim-tex: viewers")
+    check_viewers(health)
+    check_synctex(health)
     health.start("lvim-tex: project")
     check_project(health)
 end

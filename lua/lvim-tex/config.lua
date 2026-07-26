@@ -16,6 +16,7 @@
 ---@field bin          string?   Executable name (looked up on PATH; nil for `custom` until the user sets it)
 ---@field args         string[]  Fixed arguments, before the out-dir flag and the file
 ---@field out_dir_flag string?   Flag used to place output in `out_dir` ("-outdir=%s" style, %s = dir)
+---@field append_target boolean?  (custom) append the target file after `args`; false when args name it
 
 ---@class LvimTexRootConfig
 ---@field magic_comment boolean   Honour a `% !TEX root = …` directive in the first lines
@@ -31,13 +32,27 @@
 ---@field ignore   string[]  Lua patterns; a matching message is dropped entirely
 ---@field rules    table[]   EXTRA log rules appended after the shipped set (see lvim-tex.log)
 
+---@class LvimTexViewerConfig
+---@field enabled       boolean   Drive a viewer at all (false = builds only)
+---@field name          string    "auto", or one viewer name — a named one is never substituted
+---@field priority      string[]? Order tried when `name = "auto"`; nil = the per-OS default list
+---@field open_on_start boolean   Open the viewer as a build starts (external ones wait for a PDF)
+
+---@class LvimTexSynctexConfig
+---@field bin              string   The `synctex` utility
+---@field inverse          boolean  Accept inverse-search requests from a viewer
+---@field forward_on_build boolean  Forward-search to the cursor after every successful build
+
 ---@class LvimTexConfig
 ---@field builder      string                        Active builder key into `builders`
 ---@field builders     table<string, LvimTexBuilder> Per-backend command definitions
 ---@field out_dir      string?                       Build directory, relative to the root's dir (nil = alongside)
 ---@field root         LvimTexRootConfig             Main-file detection
----@field continuous   table                         Save-driven rebuild loop
+---@field continuous   table                         Save-driven rebuild loop (enabled/auto_start/on_save/timeout/debounce)
 ---@field diagnostics  LvimTexDiagnosticsConfig      Log → vim.diagnostic / quickfix
+---@field panel        table                         Build-panel layout ("float"|"area"|"bottom")
+---@field viewer       LvimTexViewerConfig           PDF viewer selection and per-viewer argv
+---@field synctex      LvimTexSynctexConfig          Forward / inverse search
 ---@field filetypes    string[]                      Filetypes lvim-tex attaches to
 ---@field notify       boolean                       Emit vim.notify lines for lifecycle events
 ---@field output_lines integer                       Trailing raw-output lines kept per project
@@ -68,7 +83,9 @@ return {
         latexrun = { bin = "latexrun", args = {}, out_dir_flag = "-O=%s" },
         arara = { bin = "arara", args = {}, out_dir_flag = nil },
         texpresso = { bin = "texpresso", args = {}, out_dir_flag = nil },
-        custom = { bin = nil, args = {}, out_dir_flag = nil },
+        -- `custom` is the escape hatch: any command, e.g. { bin = "make", args = { "pdf" } }. Set
+        -- `append_target = false` when the command already names its file in `args`.
+        custom = { bin = nil, args = {}, out_dir_flag = nil, append_target = true },
     },
 
     -- Output directory, relative to the ROOT document's directory (absolute paths are used as-is).
@@ -87,7 +104,10 @@ return {
     -- at most one rerun pending, so a burst of saves collapses into "the build that is running" plus
     -- "one more after it" — and there is no long-lived child process to babysit.
     continuous = {
+        -- The MASTER switch. Per project the loop is armed with `:LvimTex continuous` (`,la`), so one
+        -- document can rebuild on save while another does not; `auto_start` arms it as a panel opens.
         enabled = true,
+        auto_start = false,
         on_save = true,
         timeout = 120000, -- ms before a wedged build is killed (watchdog)
         debounce = 250, -- ms of quiet after a write before a build starts
@@ -100,6 +120,44 @@ return {
         quickfix = "on_error",
         ignore = {},
         rules = {},
+    },
+
+    -- The build panel (`:LvimTex output`, `,lo`). "float" is the centered frame; "area" and "bottom"
+    -- dock it, following the ecosystem's layout tokens.
+    panel = { layout = "float" },
+
+    -- The PDF viewer. `name = "auto"` takes the first available of `priority` (per-OS default list
+    -- when `priority` is nil); naming one explicitly is honoured strictly — a configured viewer that
+    -- is missing is an error, never a silent substitution.
+    --
+    -- How the preview PAGE behaves (position restore across a reload, lazy rasterisation, the
+    -- forward-search highlight) is lvim-preview's own configuration and is NOT mirrored here: one
+    -- behaviour, one owner.
+    viewer = {
+        enabled = true,
+        name = "auto", -- auto | preview | zathura | sioyek | okular | evince | skim | sumatra
+        priority = nil, -- nil = the per-OS default order, preview first
+        -- Open the viewer as a build starts (our preview page shows "building" over the last render;
+        -- an external viewer waits until there is a PDF to show).
+        open_on_start = true,
+        zathura = { bin = "zathura", args = {} },
+        sioyek = { bin = "sioyek", args = {} },
+        okular = { bin = "okular", args = {} },
+        evince = { bin = "evince", args = {} },
+        skim = { displayline = "displayline" },
+        sumatra = { bin = "SumatraPDF.exe", args = {} },
+    },
+
+    -- SyncTeX — the two-way map between the source and the PDF. `inverse` governs whether a click in
+    -- a viewer may move the cursor here; a viewer still has to be able to reach the editor, which for
+    -- our own preview page also needs lvim-preview's `artifact.allow_client_messages` (its setting,
+    -- its config — `:checkhealth lvim-tex` prints the line).
+    synctex = {
+        bin = "synctex",
+        inverse = true,
+        -- Forward-search to the cursor after every successful build, so the viewer follows what you
+        -- are editing without pressing anything.
+        forward_on_build = false,
     },
 
     filetypes = { "tex", "plaintex", "bib" },
@@ -165,5 +223,9 @@ return {
         count = "󰆙",
         doc = "󰋗",
         toc = "󰠶",
+        -- Per-severity glyphs for the build panel's diagnostic rows.
+        warn = "󰀦",
+        info = "󰋼",
+        hint = "󰌶",
     },
 }

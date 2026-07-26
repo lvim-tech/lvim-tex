@@ -22,6 +22,7 @@ local config = require("lvim-tex.config")
 local state = require("lvim-tex.state")
 local root_mod = require("lvim-tex.root")
 local log = require("lvim-tex.log")
+local viewer = require("lvim-tex.viewer")
 
 local api = vim.api
 local fn = vim.fn
@@ -191,9 +192,21 @@ local function arm(build, handle, label)
     end)
 end
 
---- Milliseconds a finished build took.
+--- The first ERROR of a run, as a one-line summary for a viewer's error strip: the file it is in and
+--- the message, which is what makes the strip actionable without opening the panel.
+---@param items table[]
+---@return string?
+local function first_error(items)
+    for _, item in ipairs(items) do
+        if item.severity == S.ERROR then
+            return ("%s:%d  %s"):format(vim.fs.basename(item.file), item.lnum, item.message)
+        end
+    end
+    return nil
+end
+
 ---@param build LvimTexBuild
----@return integer
+---@return integer  milliseconds the last run took (0 when it never ran)
 local function duration_ms(build)
     if not (build.started and build.finished) then
         return 0
@@ -253,6 +266,9 @@ local function start(root, opts)
     project.build.code = nil
 
     emit("LvimTexBuildStart", { root = root, target = target, builder = name })
+    -- The viewer learns a build began BEFORE the child is spawned: a page that can show our state
+    -- should say "building" for the whole run, not from the moment the run happens to finish.
+    viewer.on_build_start(root)
     if not opts.silent then
         notify(("%s building %s"):format(config.icons.building, label))
     end
@@ -271,6 +287,109 @@ local function start(root, opts)
     project.build.pid = handle.pid
     arm(project.build, handle, label)
     return true
+end
+
+-- ── the continuous loop (save-driven, ours — not latexmk's `-pvc`) ───────────────────────────────────
+
+--- Release a project's debounce timer. Stopping alone keeps the uv handle alive, so a session that
+--- opens many projects would accumulate one per root.
+---@param root string
+---@return nil
+local function release_debounce(root)
+    local p = state.projects[root]
+    local timer = p and p.debounce
+    if not timer then
+        return
+    end
+    timer:stop()
+    if not timer:is_closing() then
+        timer:close()
+    end
+    p.debounce = nil
+end
+
+--- Is the continuous loop ARMED for this project? The master switch is config; the per-project arming
+--- is the `:LvimTex continuous` toggle, so one project can watch while another does not.
+---@param root string
+---@return boolean
+function M.is_continuous(root)
+    return config.continuous.enabled == true and state.project(root).build.continuous == true
+end
+
+--- Toggle the loop for the project `buf` belongs to. Returns the new state (nil = no project).
+---@param buf integer?
+---@return boolean?
+function M.toggle_continuous(buf)
+    local root = root_mod.of(buf)
+    if not root then
+        notify("this buffer has no file on disk", vim.log.levels.WARN)
+        return nil
+    end
+    if not config.continuous.enabled then
+        notify("the continuous loop is disabled (continuous.enabled = false)", vim.log.levels.WARN)
+        return false
+    end
+    local project = state.project(root)
+    project.build.continuous = not project.build.continuous
+    if not project.build.continuous then
+        release_debounce(root) -- a queued rebuild must not fire after the loop was turned off
+    end
+    notify(
+        ("%s continuous build %s for %s"):format(
+            project.build.continuous and config.icons.ok or config.icons.fail,
+            project.build.continuous and "on" or "off",
+            fn.fnamemodify(root, ":t")
+        )
+    )
+    return project.build.continuous
+end
+
+--- A file was written: rebuild the project it belongs to, if the loop is armed and the file is one the
+--- build actually READS.
+---
+--- The watch set is latexmk's own dependency record (see `root.watch`), which is why a changed `.bib`,
+--- `.sty` or generated input triggers a rebuild while an unrelated file in the same directory does not.
+--- Before the first build there is no such record and the include graph stands in.
+---@param path string  the written file, absolute
+---@param buf integer
+---@return nil
+function M.on_write(path, buf)
+    if not config.continuous.on_save then
+        return
+    end
+    local root = root_mod.of(buf)
+    if not root or not M.is_continuous(root) then
+        return
+    end
+    local project = state.project(root)
+    local watched = false
+    for _, f in ipairs(root_mod.watch(root, project.target, root_mod.out_dir(root))) do
+        if f == path then
+            watched = true
+            break
+        end
+    end
+    if not watched then
+        return
+    end
+    -- DEBOUNCE, not a build per keystroke-of-save: `:wa` over five files is one rebuild, not five. The
+    -- single-flight rule in `start` then collapses whatever still overlaps.
+    release_debounce(root)
+    local timer = vim.uv.new_timer()
+    if not timer then
+        return
+    end
+    project.debounce = timer
+    timer:start(
+        math.max(0, config.continuous.debounce or 250),
+        0,
+        vim.schedule_wrap(function()
+            release_debounce(root)
+            if M.is_continuous(root) then
+                start(root, { silent = true })
+            end
+        end)
+    )
 end
 
 --- Compile the project `buf` belongs to — its current target, which is the root document unless the
@@ -333,6 +452,11 @@ function M._finish(root, builder, result)
         errors = errors,
         duration = duration_ms(build),
     })
+
+    -- The viewer is told what happened, in its own vocabulary: refetch on success, an error strip
+    -- over the LAST GOOD render on failure. The strip carries the first error, not the whole list —
+    -- the diagnostics live in the editor and the page is not a second place to read them.
+    viewer.on_build_done(root, result.code == 0, first_error(items) or ("build failed (exit %d)"):format(result.code))
 
     local label = fn.fnamemodify(root, ":t")
     if result.code == 0 then

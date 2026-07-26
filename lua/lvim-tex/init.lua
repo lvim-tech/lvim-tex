@@ -17,6 +17,7 @@ local state = require("lvim-tex.state")
 local root_mod = require("lvim-tex.root")
 local build = require("lvim-tex.build")
 local rules = require("lvim-tex.log.rules")
+local viewer = require("lvim-tex.viewer")
 
 local ok_utils, utils = pcall(require, "lvim-utils.utils")
 
@@ -61,12 +62,75 @@ function M.errors()
     vim.cmd("botright copen")
 end
 
+--- Open the viewer AND put it where the cursor is — the two halves of "show me this".
+---
+--- Nothing is built first: `,lv` after an edit would otherwise mean "build, wait, then maybe show
+--- something", which is `,ll` with a delay. The viewer shows whatever the last build produced, and the
+--- default one says so when that is nothing yet. The forward search is skipped silently when there is
+--- no PDF or no SyncTeX data — opening the viewer is still the useful half.
+---@return nil
+function M.view()
+    local root = root_mod.of(0)
+    if not root then
+        notify("this buffer has no file on disk", vim.log.levels.WARN)
+        return
+    end
+    local buf = api.nvim_get_current_buf()
+    local file = fn.fnamemodify(api.nvim_buf_get_name(buf), ":p")
+    local pos = api.nvim_win_get_cursor(0)
+    if not viewer.is_alive(root) then
+        local ok, err = viewer.open(root)
+        if not ok then
+            notify(err or "no viewer available", vim.log.levels.WARN)
+            return
+        end
+    end
+    local pdf = root_mod.pdf(root, state.project(root).target)
+    if fn.filereadable(pdf) ~= 1 then
+        notify(("%s no PDF yet — build first (%s)"):format(config.icons.viewer, fn.fnamemodify(pdf, ":~")))
+        return
+    end
+    viewer.forward(root, file, pos[1], pos[2] + 1, function(ok, err)
+        if not ok and err then
+            notify(err, vim.log.levels.WARN)
+        end
+    end)
+end
+
+--- Close this project's viewer.
+---@return nil
+function M.view_close()
+    local root = root_mod.of(0)
+    if not root then
+        return
+    end
+    viewer.close(root)
+end
+
 --- Drop the cached project data (root, include graph, watch set) and re-read it on next use.
 --- Running builds are left alone — this is "re-read the project", not a kill switch.
 ---@return nil
 function M.reload()
     state.reset()
     notify("project data reloaded")
+end
+
+--- The viewer line of `:LvimTex info`: which viewer this project is showing in, or — when none is —
+--- which one WOULD be used, so the report answers "why did nothing open" as well as "what is open".
+---@param root string
+---@return string
+local function viewer_line(root)
+    if not config.viewer.enabled then
+        return "disabled (viewer.enabled = false)"
+    end
+    if viewer.is_alive(root) then
+        return ("%s (open)"):format(state.project(root).viewer)
+    end
+    local mod, err = viewer.resolve()
+    if not mod then
+        return err or "none available"
+    end
+    return ("%s (not open)"):format(mod.name)
 end
 
 --- What lvim-tex currently believes about the project the cursor is in. The P1 form is a text
@@ -96,6 +160,11 @@ function M.info()
         ("target    %s"):format(project.target),
         ("builder   %s%s"):format(root_mod.program(root) or config.builder, engine and (" (" .. engine .. ")") or ""),
         ("out dir   %s"):format(root_mod.out_dir(root)),
+        ("pdf       %s%s"):format(
+            fn.fnamemodify(root_mod.pdf(root, project.target), ":~"),
+            fn.filereadable(root_mod.pdf(root, project.target)) == 1 and "" or "  (not built)"
+        ),
+        ("viewer    %s"):format(viewer_line(root)),
         ("includes  %d file%s"):format(#graph, #graph == 1 and "" or "s"),
         ("watching  %d file%s"):format(#watch, #watch == 1 and "" or "s"),
         ("build     %s%s"):format(
@@ -125,6 +194,54 @@ function M.info()
     return lines
 end
 
+--- A ready-made lvim-hud chrome SEGMENT for the build state — drop it into a statusline / winbar
+--- segment list (the lvim-preview / lvim-breadcrumbs `hud_segment` pattern).
+---
+--- It renders ONLY in a buffer that belongs to a project which has BUILT (or is building), so the chip
+--- appears when there is something to say and disappears otherwise. The colour carries the state:
+--- building yellow, ok green, failed red — the glyph alone is easy to miss mid-edit.
+---@param opts { name?: string, inactive?: boolean }?
+---@return table  LvimChromeSegment
+function M.hud_segment(opts)
+    opts = opts or {}
+    return {
+        name = opts.name or "tex",
+        when = function(ctx)
+            if not (opts.inactive or ctx.active) then
+                return false
+            end
+            if not vim.tbl_contains(config.filetypes, vim.bo[ctx.buf].filetype) then
+                return false
+            end
+            local root = root_mod.of(ctx.buf)
+            return root ~= nil and state.project(root).build.status ~= "idle"
+        end,
+        content = function(ctx)
+            local root = root_mod.of(ctx.buf)
+            local project = root and state.project(root) or nil
+            if not project then
+                return ""
+            end
+            local b = project.build
+            local COLOUR = { building = "Yellow", ok = "Green", failed = "Red" }
+            local text = (" %s "):format(build.status_text(ctx.buf))
+            -- A failed build says HOW MANY errors: a red dot alone makes the user open the panel to
+            -- learn whether it is one typo or a broken preamble.
+            if b.status == "failed" then
+                local errors = 0
+                for _, item in ipairs(project.diags or {}) do
+                    if item.severity == vim.diagnostic.severity.ERROR then
+                        errors = errors + 1
+                    end
+                end
+                text = (" %s %d "):format(build.status_text(ctx.buf), errors)
+            end
+            local ok, parts = pcall(require, "lvim-hud.chrome.parts")
+            return ok and parts.seg(COLOUR[b.status] or "Green", text) or text
+        end,
+    }
+end
+
 --- Every rule id the shipped set provides, grouped by package (health and the vimdoc use this).
 ---@return table<string, string[]>
 function M.rules()
@@ -136,6 +253,9 @@ end
 local COMMANDS = {
     build = function()
         build.build(0)
+    end,
+    continuous = function()
+        build.toggle_continuous(0)
     end,
     stop = function()
         build.stop(0)
@@ -154,6 +274,16 @@ local COMMANDS = {
     end,
     info = function()
         M.info()
+    end,
+    output = function()
+        require("lvim-tex.panel").open(0)
+    end,
+    view = function(arg)
+        if arg == "close" then
+            M.view_close()
+        else
+            M.view()
+        end
     end,
     reload = function()
         M.reload()
@@ -184,6 +314,7 @@ local function attach_keys(buf)
     end
 
     map(keys.build, COMMANDS.build, "build the document")
+    map(keys.continuous, COMMANDS.continuous, "toggle the continuous (rebuild on save) loop")
     map(keys.stop, COMMANDS.stop, "stop this project's build")
     map(keys.stop_all, COMMANDS.stop_all, "stop every build")
     map(keys.clean, function()
@@ -195,6 +326,10 @@ local function attach_keys(buf)
     map(keys.errors, COMMANDS.errors, "open the build's quickfix list")
     map(keys.main, COMMANDS.main, "toggle the compile target (root ⇄ subfile)")
     map(keys.info, COMMANDS.info, "project info")
+    map(keys.output, COMMANDS.output, "open the build panel")
+    map(keys.view, function()
+        M.view()
+    end, "open the PDF viewer")
     map(keys.reload, COMMANDS.reload, "reload the project data")
 end
 
@@ -235,6 +370,33 @@ function M.setup(opts)
         end,
     })
 
+    -- Forward-search after a successful build, when asked for: the viewer then follows what you are
+    -- editing with no keystroke. Driven off the PUBLIC event rather than a hook inside the build, so
+    -- it is exactly what any other consumer could do.
+    api.nvim_create_autocmd("User", {
+        group = augroup,
+        pattern = "LvimTexBuildDone",
+        desc = "lvim-tex: forward-search after a successful build",
+        callback = function(args)
+            local data = args.data or {}
+            if not config.synctex.forward_on_build or data.code ~= 0 or not data.root then
+                return
+            end
+            local buf = api.nvim_get_current_buf()
+            if not vim.tbl_contains(config.filetypes, vim.bo[buf].filetype) then
+                return
+            end
+            local pos = api.nvim_win_get_cursor(0)
+            viewer.forward(
+                data.root,
+                fn.fnamemodify(api.nvim_buf_get_name(buf), ":p"),
+                pos[1],
+                pos[2] + 1,
+                function() end
+            )
+        end,
+    })
+
     -- A magic `% !TEX root` comment can be added or changed at any time, and the root it names
     -- decides everything else — so the cached answer for THIS buffer is dropped on write.
     api.nvim_create_autocmd("BufWritePost", {
@@ -243,6 +405,20 @@ function M.setup(opts)
         desc = "lvim-tex: re-resolve the root after a write",
         callback = function(args)
             state.buf_root[args.buf] = nil
+        end,
+    })
+
+    -- The continuous loop's trigger. Deliberately NOT limited to the TeX filetypes: a rebuild is owed
+    -- when a `.sty`, a `.cls`, a generated input or an image the document reads changes too — which is
+    -- exactly what the watch set (latexmk's own dependency record) knows and a filetype pattern cannot.
+    api.nvim_create_autocmd("BufWritePost", {
+        group = augroup,
+        desc = "lvim-tex: rebuild on save when the continuous loop is armed",
+        callback = function(args)
+            local path = api.nvim_buf_get_name(args.buf)
+            if path ~= "" then
+                build.on_write(vim.fs.normalize(vim.fn.fnamemodify(path, ":p")), args.buf)
+            end
         end,
     })
 
@@ -262,7 +438,8 @@ function M.setup(opts)
         complete = function(arg, line)
             local words = vim.split(vim.trim(line), "%s+")
             if #words > 2 or (#words == 2 and arg == "") then
-                return words[2] == "clean" and { "full" } or {}
+                local ARGS = { clean = { "full" }, view = { "close" } }
+                return ARGS[words[2]] or {}
             end
             local names = vim.tbl_keys(COMMANDS)
             table.sort(names)

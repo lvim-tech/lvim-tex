@@ -355,6 +355,20 @@ function M.out_dir(root)
     return fs.normalize(dir .. "/" .. out)
 end
 
+--- The PDF the build for `root` produces when compiling `target`.
+---
+--- Named after the TARGET, not the root: `:LvimTex main` compiles the subfile you are in, and every
+--- engine names its output after the file it was handed. It sits in the out dir for the same reason
+--- the log does. Like `out_dir`, this is the ONE answer — the viewer layer, health and the SyncTeX
+--- calls must not each derive it themselves.
+---@param root string
+---@param target string?  defaults to `root`
+---@return string
+function M.pdf(root, target)
+    local jobname = fn.fnamemodify(target or root, ":t:r")
+    return fs.normalize(M.out_dir(root) .. "/" .. jobname .. ".pdf")
+end
+
 --- Every file `path` pulls in, one level deep, as `{ path = <abs>, recurse = <boolean> }` records.
 --- Uses the latex grammar; returns nil (not an empty list) when the parser is unavailable, so the
 --- caller can tell "no includes" from "cannot know".

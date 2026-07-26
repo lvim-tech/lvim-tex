@@ -9,6 +9,8 @@ CONTENTS                                                     *lvim-tex-contents*
     4. The project model .................... |lvim-tex-project|
     5. Building ............................. |lvim-tex-building|
     6. Diagnostics .......................... |lvim-tex-diagnostics|
+    6a. Viewing ............................. |lvim-tex-viewing|
+    6b. SyncTeX ............................. |lvim-tex-synctex|
     7. Adding a log rule .................... |lvim-tex-log-rules|
     8. Commands ............................. |lvim-tex-commands|
     9. Keymaps .............................. |lvim-tex-keymaps|
@@ -25,10 +27,12 @@ lvim-snippets. What no generic layer can express is the document itself: which
 file IS the document, how it is built, what its log means, and where a position
 in the PDF maps back to in the source.
 
-This release is phase 1 — the project model, one-shot builds, and the log →
-diagnostics pipeline. The continuous loop, the viewer/SyncTeX layer, the TOC
-panel, the editing operators, conceal and the maths abbreviations follow in
-later phases. Nothing is documented here that is not implemented.
+This release covers phases 1-4 — the project model, builds (one-shot and a
+save-driven loop), the log → diagnostics pipeline, the build panel, the viewer
+layer with the PDF page as its default viewer, and SyncTeX in both directions
+with the external viewers. The TOC panel, the editing operators, conceal and
+the maths abbreviations follow in later phases. Nothing is documented here that
+is not implemented.
 
 ==============================================================================
 2. REQUIREMENTS                                          *lvim-tex-requirements*
@@ -103,6 +107,20 @@ WATCHDOG        A run outliving `continuous.timeout` is killed.
 RERUN LOOP      How many engine passes are needed, and when biber/bibtex has to
                 run in between, is latexmk's job and is delegated to it.
 
+                                                          *lvim-tex-continuous*
+CONTINUOUS      `:LvimTex continuous` arms a SAVE-DRIVEN rebuild for the current
+                project (per project, so one document can watch while another
+                does not; `continuous.enabled` is the master switch and
+                `continuous.auto_start` arms it as a project opens).
+
+                A save rebuilds only when the written file is one the build
+                actually READS — that set comes from latexmk's own dependency
+                record (see |lvim-tex-watch|), so a changed `.bib`, `.sty` or
+                generated input triggers a rebuild while an unrelated file in
+                the same directory does not. A burst of saves is debounced
+                (`continuous.debounce`) into ONE build, and single-flight
+                collapses whatever still overlaps.
+
                                                               *lvim-tex-outdir*
 `out_dir` (default `"build"`) is resolved against the root's directory and
 passed to the builder; it is created if missing, because latexmk will not create
@@ -119,7 +137,10 @@ dvipdfmx) becomes the matching latexmk flag. A directive naming one of the
 
 A TeX log is a transcript, not a diagnostic stream, so it is parsed in three
 passes: records are un-wrapped and attributed to a file through the log's paren
-nesting; the four position-carrying shapes are classified (`file:line:` errors,
+nesting (a `(` that opened no file is still tracked, so a message's own
+`(natbib)` continuation marker cannot pop a real file off that stack; and lines
+are joined only when the log demonstrably wraps at the 79-column default, since
+TeX never writes a line longer than `max_print_line` and our builds raise it); the four position-carrying shapes are classified (`file:line:` errors,
 warning blocks with their `on input line N` tail, over/underfull boxes, and the
 bare `!` error form); then the rule table refines each record.
 
@@ -133,6 +154,106 @@ it.
 `"on_error"` (the default) or `"always"`. `diagnostics.boxes` adds over/underfull
 box reports, off by default because they are near-constant in real documents.
 `diagnostics.ignore` holds Lua patterns; a matching message is dropped.
+
+==============================================================================
+6a. VIEWING                                                   *lvim-tex-viewing*
+
+The viewer is ONE interface with many implementations, and the build lifecycle
+addresses it by what a viewer can DO, never by which one it is:
+
+    reload = "auto"   it notices the file changed by itself — we do nothing
+    reload = "push"   we must tell it (our own page, over its websocket)
+    reload = "none"   it cannot reload; the user re-opens it (health says so)
+    status            it can show OUR build state over the last render
+    inverse           a click in it can reach the editor (a later phase)
+
+DEFAULT VIEWER  lvim-preview's PDF page — already in the ecosystem, on every
+                platform, nothing to install, and the only viewer that can
+                render a build state. The PDF is registered as an lvim-preview
+                ARTIFACT before the first build, so the page opens immediately
+                and says "building" rather than failing on a file that does not
+                exist yet.
+
+                A starting build raises "building" over the LAST GOOD render, a
+                failed one an error strip naming the first error, a successful
+                one refetches the file. A failed build never swaps the render:
+                a PDF from a failed run is stale or half-written, and replacing
+                it would lose the page you were reading.
+
+                The artifact is deliberately NOT filesystem-watched. A build
+                writes its PDF several times across its reruns, and only the
+                build knows which write was the final, coherent one.
+
+                How the PAGE behaves — position restore across a reload, lazy
+                rasterisation, the highlight duration — is lvim-preview's own
+                configuration and is not mirrored here: one owner.
+
+SELECTION       `viewer.name = "auto"` takes the first available of
+                `viewer.priority` (a per-OS default list, preview first).
+                Naming a viewer explicitly is honoured STRICTLY — a configured
+                viewer that is missing is an error, never a substitution.
+
+                `:checkhealth lvim-tex` prints this machine's viewer matrix and
+                distinguishes three states: planned but not in this version,
+                implemented but not installed here, and ready.
+
+OPENING         `viewer.open_on_start` opens the viewer as a build starts, for
+                a viewer that can show the build state; one that cannot is left
+                until there is a PDF worth opening. `:LvimTex view` opens it at
+                any time and never builds first.
+
+==============================================================================
+6b. SYNCTEX                                                   *lvim-tex-synctex*
+
+`-synctex=1` makes the engine record where each piece of the PDF came from;
+the `synctex` utility is the only thing that reads that record, and lvim-tex is
+the only thing here that speaks to it:
+
+    forward   `synctex view -i <line>:<col>:<file> -o <pdf>` → Page / x / y
+    inverse   `synctex edit -o <page>:<x>:<y>:<pdf>` → Input / Line / Column
+
+A viewer with SyncTeX support of its OWN is handed the source position instead
+and resolves it itself — asking on its behalf would be a second resolution that
+can only disagree with the viewer's.
+
+FORWARD         `:LvimTex view` (`<localleader>lv`) opens the viewer and puts
+                it at the paragraph under the cursor. `synctex` answers at
+                paragraph granularity: that is what the format records, not a
+                rounding error here. `synctex.forward_on_build` does the same
+                after every successful build, so the viewer follows what you
+                are editing with no keystroke.
+
+                                                      *lvim-tex-inverse-search*
+INVERSE         A click in the viewer moving the cursor here. It needs the
+                viewer to be able to REACH this Neovim, and it already can:
+                `v:servername` names the socket, so the launch command embeds
+                `nvim --server <socket> --remote-expr "…"`. Nothing extra is
+                installed (no neovim-remote) and no shim script is written.
+
+                `synctex.inverse = false` refuses every such request.
+
+                Per viewer:
+                  preview   ctrl-click, once lvim-preview's own
+                            `artifact.allow_client_messages` is enabled — its
+                            setting, in its config; `:checkhealth lvim-tex`
+                            prints the line to add.
+                  zathura   automatic when lvim-tex launched it (`-x`).
+                  okular    automatic when lvim-tex launched it
+                            (`--editor-cmd`).
+                  sioyek    automatic when lvim-tex launched it
+                            (`--inverse-search`).
+                  Skim      a ONE-TIME setting in Skim's Preferences → Sync;
+                            health prints the exact Command and Arguments.
+                  Sumatra   automatic when lvim-tex launched it
+                            (`-inverse-search`).
+                  evince    not claimed: it needs a D-Bus signal monitor that
+                            has not been exercised anywhere yet.
+
+HONESTY         Health never reports an unproven module as ready. It separates
+                what was verified against a real binary on this machine
+                (preview, zathura, okular) from what follows the viewer's own
+                documentation on a platform this machine is not (sioyek, Skim,
+                SumatraPDF) from what is experimental (evince).
 
 ==============================================================================
 7. ADDING A LOG RULE                                        *lvim-tex-log-rules*
@@ -160,15 +281,32 @@ attributed to its file — nothing is dropped silently, which is what makes the
 shipped set safe to grow one package at a time.
 
 Rules ship for: the LaTeX kernel, hyperref, biblatex/biber/bibtex,
-babel/polyglossia, the font machinery (NFSS, fontspec, fontenc), and the layout
-packages (pgf/pgfplots, geometry, microtype, amsmath, caption, float).
-`:checkhealth lvim-tex` prints the current count per package.
+babel/polyglossia, the font machinery (NFSS, fontspec, fontenc), the layout
+packages (pgf/pgfplots, geometry, microtype, amsmath, caption, float), graphics
+(graphicx, the driver `.def`s, xcolor), tables and lists (array, longtable,
+tabularx, multicol, enumitem), code listings (listings, minted),
+cross-referencing (cleveref, varioref, natbib) and the engine itself (inputenc,
+the TeX capacity limits). `:checkhealth lvim-tex` prints the current count per
+package.
+
+Group ORDER inside the shipped set is load-bearing where two packages describe
+the same failure: the graphics rules precede the kernel's generic missing-file
+rule, and the cross-referencing rules precede biblatex's, so natbib's empty
+bibliography is not reported as an empty bibtex entry.
 
 ==============================================================================
 8. COMMANDS                                                  *lvim-tex-commands*
 
                                                                      *:LvimTex*
 :LvimTex build          Compile the current project's target (the default).
+:LvimTex continuous     Arm / disarm the save-driven rebuild loop for this
+                        project (see |lvim-tex-continuous|).
+:LvimTex output         The build panel: the project facts, the diagnostics
+                        grouped by severity with the RULE that produced each,
+                        and the builder's raw output tail.
+:LvimTex view           Open the PDF viewer on this project's output and
+                        forward-search it to the cursor (|lvim-tex-synctex|).
+:LvimTex view close     Close it.
 :LvimTex stop           Stop this project's build.
 :LvimTex stop_all       Stop every running build.
 :LvimTex clean          Remove the auxiliary files (`latexmk -c`).
@@ -190,6 +328,9 @@ are untouched. The effective key is `keys.prefix .. <suffix>`; with the default
 prefix and `maplocalleader = ","`, `keys.build` reads `,ll`.
 
     <localleader>ll     build
+    <localleader>la     toggle the save-driven rebuild loop
+    <localleader>lo     open the build panel
+    <localleader>lv     open the PDF viewer and jump it to the cursor
     <localleader>lk     stop this build
     <localleader>lK     stop every build
     <localleader>lc     clean auxiliary files
@@ -232,17 +373,23 @@ builders        Per-backend `{ bin, args, out_dir_flag }`. `out_dir_flag` is a
 out_dir         Build directory, relative to the root's own directory. `nil`
                 keeps every artefact beside the source.
 root            `magic_comment`, `scan_lines`, `markers`, `subfiles`.
-continuous      `enabled`, `on_save`, `timeout`, `debounce`.
+continuous      `enabled`, `auto_start`, `on_save`, `timeout`, `debounce`.
 diagnostics     `enabled`, `warnings`, `boxes`, `quickfix`, `ignore`, `rules`.
+panel           Build-panel layout: `"float"`, `"area"` or `"bottom"`.
+viewer          `enabled`, `name`, `priority`, `open_on_start`, plus a
+                `{ bin, args }` table per external viewer
+                (see |lvim-tex-viewing|).
+synctex         `bin`, `inverse`, `forward_on_build` (|lvim-tex-synctex|).
 filetypes       Filetypes lvim-tex attaches to.
 notify          Emit |vim.notify| lines for lifecycle events.
 output_lines    Trailing raw-output lines kept per project.
 keys            `prefix` plus one suffix per action (see |lvim-tex-keymaps|).
 icons           Nerd Font glyphs; all defaults are single-width.
 
-Options for features that have not landed yet (`view`, `outline`, `imaps`, the
-editing operators) are already present so the shape does not change under you
-later; they take effect as each phase ships.
+Options for features that have not landed yet (`outline`, `imaps`, the editing
+operators, and the per-viewer tables of the viewers still to come) are already
+present so the shape does not change under you later; they take effect as each
+phase ships.
 
 ==============================================================================
 12. HEALTH                                                     *lvim-tex-health*
@@ -250,7 +397,8 @@ later; they take effect as each phase ships.
 `:checkhealth lvim-tex` reports the active builder and its binary, the `latex`
 and `bibtex` grammars (with the install line when one is missing), the LSP side
 owned by lvim-lang, the log-rule count per package, any internally inconsistent
-config value, and — for the current buffer — the resolved root, the `% !TEX`
-directives in play, and the out dir.
+config value, this machine's VIEWER MATRIX (|lvim-tex-viewing|), and — for the
+current buffer — the resolved root, the `% !TEX` directives in play, and the
+out dir.
 
 vim:tw=78:ts=8:ft=help:norl:

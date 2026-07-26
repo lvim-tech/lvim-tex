@@ -25,6 +25,8 @@
 ---@field build  LvimTexBuild
 ---@field diags  table[]?        Last published diagnostic items (pre-namespace split)
 ---@field diag_bufs table<integer, boolean>?  Buffers the LAST run published to, so they can be cleared
+---@field debounce uv.uv_timer_t?  the continuous loop's pending-rebuild timer for this project
+---@field viewer string?         Name of the viewer opened for this project (nil = none opened)
 
 local M = {}
 
