@@ -1,0 +1,256 @@
+*lvim-tex.txt*   LaTeX support for the lvim-tech ecosystem
+
+==============================================================================
+CONTENTS                                                     *lvim-tex-contents*
+
+    1. Introduction ......................... |lvim-tex-introduction|
+    2. Requirements ......................... |lvim-tex-requirements|
+    3. Setup ................................ |lvim-tex-setup|
+    4. The project model .................... |lvim-tex-project|
+    5. Building ............................. |lvim-tex-building|
+    6. Diagnostics .......................... |lvim-tex-diagnostics|
+    7. Adding a log rule .................... |lvim-tex-log-rules|
+    8. Commands ............................. |lvim-tex-commands|
+    9. Keymaps .............................. |lvim-tex-keymaps|
+   10. Events ............................... |lvim-tex-events|
+   11. Configuration ....................... |lvim-tex-configuration|
+   12. Health .............................. |lvim-tex-health|
+
+==============================================================================
+1. INTRODUCTION                                          *lvim-tex-introduction*
+
+lvim-tex owns what is TeX-SPECIFIC and nothing else. texlab and latexindent are
+wired by lvim-lang, the grammars belong to lvim-ts, the snippet engine to
+lvim-snippets. What no generic layer can express is the document itself: which
+file IS the document, how it is built, what its log means, and where a position
+in the PDF maps back to in the source.
+
+This release is phase 1 — the project model, one-shot builds, and the log →
+diagnostics pipeline. The continuous loop, the viewer/SyncTeX layer, the TOC
+panel, the editing operators, conceal and the maths abbreviations follow in
+later phases. Nothing is documented here that is not implemented.
+
+==============================================================================
+2. REQUIREMENTS                                          *lvim-tex-requirements*
+
+    - Neovim 0.11+
+    - a TeX distribution providing `latexmk`
+    - lvim-utils
+    - the `latex` and `bibtex` treesitter grammars (for the include graph)
+    - optional: lvim-lang, whose latex provider owns the LSP wiring
+
+==============================================================================
+3. SETUP                                                        *lvim-tex-setup*
+
+Install with lvim-installer, or with Neovim's native |vim.pack|: >lua
+    vim.pack.add({ "https://github.com/lvim-tech/lvim-tex" })
+
+    require("lvim-tex").setup({})
+<
+`setup()` merges your options into the live configuration in place, so every
+reader of `require("lvim-tex.config")` sees the effective values.
+
+==============================================================================
+4. THE PROJECT MODEL                                          *lvim-tex-project*
+
+A LaTeX project is compiled through ONE root document. Building the chapter you
+happen to be editing would produce a document with no preamble, so every action
+resolves the root first, through a chain of decreasing evidence strength:
+
+    1. a `% !TEX root = …` magic comment, followed transitively (max 5 hops)
+    2. `\documentclass[main.tex]{subfiles}` — the subfiles package names its
+       main file in the optional argument
+    3. a marker file upward: `.texlabroot`, `texlabroot`, `.latexmkrc` — the
+       same markers texlab roots on, so the LSP and the builder always agree
+    4. an upward `\documentclass` scan: this file, its directory, then ancestors
+    5. the file itself
+
+Step 2 must precede step 4 because a subfile carries a `\documentclass` of its
+own. Set `root.subfiles = "subfile"` to compile the subfile you are in instead.
+
+                                                       *lvim-tex-target-toggle*
+The COMPILE TARGET is normally the root. `:LvimTex main` toggles it to the
+current file and back; the choice is remembered per project.
+
+                                                               *lvim-tex-graph*
+The INCLUDE GRAPH is scanned from the root with the `latex` grammar and holds
+every file the document pulls in (`\input`, `\include`, `\subfile`, `\import`,
+`\addbibresource`, `\bibliography`, `\includegraphics`, …).
+
+                                                               *lvim-tex-watch*
+The WATCH SET — the files a rebuild should react to — comes from latexmk's own
+dependency records, not from the graph: `<jobname>.fls` for what the ENGINE
+read, and `<jobname>.fdb_latexmk` for what every latexmk RULE read. Both are
+needed: a `.bib` is read by biber and never by the engine, so it appears only in
+the second. Generated artefacts and the TeX distribution's own files are
+excluded. Before the first build there is no such record, so the include graph
+stands in.
+
+==============================================================================
+5. BUILDING                                                  *lvim-tex-building*
+
+`:LvimTex build` compiles the current target with the active builder (latexmk by
+default). Three rules govern a run:
+
+SINGLE-FLIGHT   One build per project. A request arriving while a build is in
+                flight sets ONE pending flag, so a burst of saves collapses into
+                the run in progress plus one rerun afterwards. latexmk's own
+                watch mode is deliberately not used: scheduling stays here, and
+                there is no long-lived child process.
+
+WATCHDOG        A run outliving `continuous.timeout` is killed.
+
+RERUN LOOP      How many engine passes are needed, and when biber/bibtex has to
+                run in between, is latexmk's job and is delegated to it.
+
+                                                              *lvim-tex-outdir*
+`out_dir` (default `"build"`) is resolved against the root's directory and
+passed to the builder; it is created if missing, because latexmk will not create
+it itself. Note that a log records paths relative to the directory the ENGINE
+ran in — the target's own directory — never relative to the out dir.
+
+                                                             *lvim-tex-program*
+A `% !TEX program = …` directive naming an engine (xelatex, lualatex, pdflatex,
+dvipdfmx) becomes the matching latexmk flag. A directive naming one of the
+`builders` keys selects that backend instead.
+
+==============================================================================
+6. DIAGNOSTICS                                            *lvim-tex-diagnostics*
+
+A TeX log is a transcript, not a diagnostic stream, so it is parsed in three
+passes: records are un-wrapped and attributed to a file through the log's paren
+nesting; the four position-carrying shapes are classified (`file:line:` errors,
+warning blocks with their `on input line N` tail, over/underfull boxes, and the
+bare `!` error form); then the rule table refines each record.
+
+Entries are published as |vim.diagnostic| in lvim-tex's own namespace, on the
+file each entry NAMES — usually not the buffer you built from. Buffers written
+to by the previous run are cleared first, so a fixed error disappears. A file
+that is not open yet still receives its entries: they are there when you open
+it.
+
+`diagnostics.quickfix` decides when the quickfix list is opened: `"never"`,
+`"on_error"` (the default) or `"always"`. `diagnostics.boxes` adds over/underfull
+box reports, off by default because they are near-constant in real documents.
+`diagnostics.ignore` holds Lua patterns; a matching message is dropped.
+
+==============================================================================
+7. ADDING A LOG RULE                                        *lvim-tex-log-rules*
+
+Per-package meaning is DATA. Coverage grows by adding a row, never by editing
+the parser. A rule: >lua
+    {
+        id = "mypkg.deprecated",     -- reported by :LvimTex info
+        pkg = "mypkg",               -- for documentation and health
+        match = "is deprecated, use", -- a Lua pattern, or fun(rec): boolean
+        severity = vim.diagnostic.severity.WARN,
+        extract = function(rec)      -- refine file/lnum/col/message
+            local old = rec.text:match("`(.-)'")
+            return { message = ("mypkg: %s is deprecated"):format(old or "?") }
+        end,
+    }
+<
+The record passed to `match`/`extract` carries `text` (the un-wrapped message),
+`file`, `lnum`, `kind` (`error`|`warning`|`box`|`info`) and `raw`.
+
+Returning `false` from `extract` DROPS the record. Rules from
+`diagnostics.rules` are tried after the shipped set, so matching the same text
+overrides a shipped verdict. A record matching no rule is still reported,
+attributed to its file — nothing is dropped silently, which is what makes the
+shipped set safe to grow one package at a time.
+
+Rules ship for: the LaTeX kernel, hyperref, biblatex/biber/bibtex,
+babel/polyglossia, the font machinery (NFSS, fontspec, fontenc), and the layout
+packages (pgf/pgfplots, geometry, microtype, amsmath, caption, float).
+`:checkhealth lvim-tex` prints the current count per package.
+
+==============================================================================
+8. COMMANDS                                                  *lvim-tex-commands*
+
+                                                                     *:LvimTex*
+:LvimTex build          Compile the current project's target (the default).
+:LvimTex stop           Stop this project's build.
+:LvimTex stop_all       Stop every running build.
+:LvimTex clean          Remove the auxiliary files (`latexmk -c`).
+:LvimTex clean full     Also remove the produced PDF (`latexmk -C`).
+:LvimTex main           Toggle the compile target: root ⇄ current subfile.
+:LvimTex errors         Open the quickfix list of the last build.
+:LvimTex info           Report root, target, builder, out dir, include and
+                        watch counts, build status, and which rule produced
+                        each diagnostic entry.
+:LvimTex reload         Drop the cached project data and re-read it. Running
+                        builds are left alone.
+
+==============================================================================
+9. KEYMAPS                                                    *lvim-tex-keymaps*
+
+Every map is BUFFER-LOCAL to `config.filetypes` and hangs off `<localleader>`,
+so the group exists only inside a TeX buffer and the global `<leader>` groups
+are untouched. The effective key is `keys.prefix .. <suffix>`; with the default
+prefix and `maplocalleader = ","`, `keys.build` reads `,ll`.
+
+    <localleader>ll     build
+    <localleader>lk     stop this build
+    <localleader>lK     stop every build
+    <localleader>lc     clean auxiliary files
+    <localleader>lC     clean everything
+    <localleader>le     open the quickfix list
+    <localleader>ls     toggle the compile target
+    <localleader>li     project info
+    <localleader>lx     reload the project data
+
+Set a suffix to `false` to leave it unmapped; change `keys.prefix` to move the
+whole group. Every map carries a `desc`, so lvim-keys-helper shows them with no
+central registration.
+
+==============================================================================
+10. EVENTS                                                     *lvim-tex-events*
+
+Both carry their payload in `args.data`, so a statusline, panel or viewer can
+react without polling: >lua
+    vim.api.nvim_create_autocmd("User", {
+        pattern = "LvimTexBuildDone",
+        callback = function(args)
+            print(args.data.code, args.data.errors, args.data.duration)
+        end,
+    })
+<
+                                                    *LvimTexBuildStart*
+User LvimTexBuildStart      { root, target, builder }
+                                                    *LvimTexBuildDone*
+User LvimTexBuildDone       { root, builder, code, errors, duration }
+
+==============================================================================
+11. CONFIGURATION                                       *lvim-tex-configuration*
+
+Every glyph, timeout, binary, argv, key and layout is an option. See the README
+for the complete default table; the entries that shape behaviour most:
+
+builder         Active backend, a key of `builders`. Default `"latexmk"`.
+builders        Per-backend `{ bin, args, out_dir_flag }`. `out_dir_flag` is a
+                format string (`"-outdir=%s"`).
+out_dir         Build directory, relative to the root's own directory. `nil`
+                keeps every artefact beside the source.
+root            `magic_comment`, `scan_lines`, `markers`, `subfiles`.
+continuous      `enabled`, `on_save`, `timeout`, `debounce`.
+diagnostics     `enabled`, `warnings`, `boxes`, `quickfix`, `ignore`, `rules`.
+filetypes       Filetypes lvim-tex attaches to.
+notify          Emit |vim.notify| lines for lifecycle events.
+output_lines    Trailing raw-output lines kept per project.
+keys            `prefix` plus one suffix per action (see |lvim-tex-keymaps|).
+icons           Nerd Font glyphs; all defaults are single-width.
+
+Options for features that have not landed yet (`view`, `outline`, `imaps`, the
+editing operators) are already present so the shape does not change under you
+later; they take effect as each phase ships.
+
+==============================================================================
+12. HEALTH                                                     *lvim-tex-health*
+
+`:checkhealth lvim-tex` reports the active builder and its binary, the `latex`
+and `bibtex` grammars (with the install line when one is missing), the LSP side
+owned by lvim-lang, the log-rule count per package, any internally inconsistent
+config value, and — for the current buffer — the resolved root, the `% !TEX`
+directives in play, and the out dir.
+
+vim:tw=78:ts=8:ft=help:norl:

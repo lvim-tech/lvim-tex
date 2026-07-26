@@ -1,0 +1,448 @@
+-- lvim-tex: the build lifecycle — the one place that knows a build is running.
+--
+-- Everything here exists because a LaTeX build is slow, repeatable and easy to start twice. The
+-- rules it enforces:
+--
+--   SINGLE-FLIGHT — one build per project at a time. A request that arrives while a build is in
+--     flight does not queue up N times; it sets ONE pending flag, so a burst of saves collapses into
+--     "the run in progress" plus "one more run afterwards". This is why we do not use latexmk's own
+--     `-pvc` watch mode: scheduling stays ours, and there is no long-lived child to babysit.
+--   WATCHDOG — a run that exceeds `continuous.timeout` is killed. A TeX engine waiting for terminal
+--     input (which `-interaction=nonstopmode` normally prevents, but a broken `.latexmkrc` can still
+--     produce) would otherwise hang forever inside a job with no tty.
+--   ATTRIBUTED DIAGNOSTICS — the log's entries belong to whichever file they name, which is usually
+--     NOT the buffer that triggered the build. They are published per file, and every buffer touched
+--     by the previous run is cleared first, so a fixed error disappears from the chapter it was in.
+--   EVENTS — `User LvimTexBuildStart` / `LvimTexBuildDone` carry the project data, so a statusline,
+--     a panel or a viewer can react without polling.
+--
+---@module "lvim-tex.build"
+
+local config = require("lvim-tex.config")
+local state = require("lvim-tex.state")
+local root_mod = require("lvim-tex.root")
+local log = require("lvim-tex.log")
+
+local api = vim.api
+local fn = vim.fn
+local uv = vim.uv
+
+local M = {}
+
+local S = vim.diagnostic.severity
+
+-- Severity → the quickfix `type` character.
+---@type table<integer, string>
+local QF_TYPE = { [S.ERROR] = "E", [S.WARN] = "W", [S.INFO] = "I", [S.HINT] = "N" }
+
+--- Notify, gated by `config.notify`.
+---@param msg string
+---@param level integer?
+---@return nil
+local function notify(msg, level)
+    if config.notify then
+        vim.notify("lvim-tex: " .. msg, level or vim.log.levels.INFO)
+    end
+end
+
+--- Fire a `User` autocmd carrying the project data.
+---@param name string   the pattern ("LvimTexBuildStart" / "LvimTexBuildDone")
+---@param data table
+---@return nil
+local function emit(name, data)
+    api.nvim_exec_autocmds("User", { pattern = name, data = data, modeline = false })
+end
+
+--- The backend module for `name`, or nil with a reason when it is not implemented yet.
+---@param name string
+---@return table? mod, string? err
+local function backend(name)
+    local ok, mod = pcall(require, "lvim-tex.build." .. name)
+    if not ok or type(mod) ~= "table" then
+        return nil, ("builder %q is not available in this version"):format(name)
+    end
+    return mod, nil
+end
+
+--- The diagnostic namespace, created on first use.
+---@return integer
+local function namespace()
+    if not state.ns then
+        state.ns = api.nvim_create_namespace("lvim-tex")
+    end
+    return state.ns
+end
+
+--- Publish `items` as diagnostics, replacing everything the previous run of this project published.
+---@param root string
+---@param items LvimTexItem[]
+---@return nil
+local function publish(root, items)
+    local project = state.project(root)
+    local ns = namespace()
+
+    -- Clear the buffers the LAST run wrote to, not just the ones this run touches: an entry that was
+    -- fixed leaves no item behind to clear itself.
+    for buf in pairs(project.diag_bufs or {}) do
+        if api.nvim_buf_is_valid(buf) then
+            vim.diagnostic.reset(ns, buf)
+        end
+    end
+    project.diag_bufs = {}
+    project.diags = items
+
+    if not config.diagnostics.enabled then
+        return
+    end
+
+    ---@type table<integer, table[]>
+    local by_buf = {}
+    for _, item in ipairs(items) do
+        -- `bufadd` gives an entry in the buffer list WITHOUT loading the file, so diagnostics for a
+        -- chapter the user has not opened yet are already there when they open it.
+        local buf = fn.bufadd(item.file)
+        if buf ~= 0 then
+            by_buf[buf] = by_buf[buf] or {}
+            table.insert(by_buf[buf], {
+                lnum = math.max(item.lnum - 1, 0),
+                col = math.max(item.col - 1, 0),
+                severity = item.severity,
+                message = item.message,
+                source = "lvim-tex",
+                code = item.rule,
+            })
+        end
+    end
+
+    for buf, diags in pairs(by_buf) do
+        vim.diagnostic.set(ns, buf, diags)
+        project.diag_bufs[buf] = true
+    end
+end
+
+--- Fill the quickfix list from `items` and open it according to `diagnostics.quickfix`.
+---@param root string
+---@param items LvimTexItem[]
+---@return nil
+local function quickfix(root, items)
+    local mode = config.diagnostics.quickfix
+    if mode == "never" then
+        return
+    end
+    local qf, errors = {}, 0
+    for _, item in ipairs(items) do
+        if item.severity == S.ERROR then
+            errors = errors + 1
+        end
+        qf[#qf + 1] = {
+            filename = item.file,
+            lnum = item.lnum,
+            col = item.col,
+            text = item.message,
+            type = QF_TYPE[item.severity] or "I",
+        }
+    end
+    fn.setqflist({}, "r", { title = ("lvim-tex: %s"):format(fn.fnamemodify(root, ":t")), items = qf })
+    if mode == "always" and #qf > 0 then
+        vim.cmd("botright copen")
+    elseif mode == "on_error" and errors > 0 then
+        vim.cmd("botright copen")
+    end
+end
+
+--- Stop the watchdog timer of `build`, if one is armed.
+---@param build LvimTexBuild
+---@return nil
+local function disarm(build)
+    if build.watchdog then
+        build.watchdog:stop()
+        if not build.watchdog:is_closing() then
+            build.watchdog:close()
+        end
+        build.watchdog = nil
+    end
+end
+
+--- Arm the watchdog for a run: kill the child if it outlives `continuous.timeout`.
+---@param build LvimTexBuild
+---@param handle vim.SystemObj
+---@param label string  the target's basename, for the message
+---@return nil
+local function arm(build, handle, label)
+    local timeout = config.continuous.timeout
+    if not timeout or timeout <= 0 then
+        return
+    end
+    local timer = uv.new_timer()
+    if not timer then
+        return
+    end
+    build.watchdog = timer
+    timer:start(timeout, 0, function()
+        vim.schedule(function()
+            if build.job then
+                handle:kill("sigterm")
+                notify(
+                    ("%s build of %s exceeded %dms and was killed"):format(config.icons.fail, label, timeout),
+                    vim.log.levels.WARN
+                )
+            end
+        end)
+    end)
+end
+
+--- Milliseconds a finished build took.
+---@param build LvimTexBuild
+---@return integer
+local function duration_ms(build)
+    if not (build.started and build.finished) then
+        return 0
+    end
+    return math.floor((build.finished - build.started) / 1e6)
+end
+
+--- Compile the project rooted at `root`. Every entry point funnels through here, so a rerun is
+--- always started against the project it belongs to and never against "whatever buffer is current".
+---@param root string
+---@param opts { silent?: boolean }
+---@return boolean started
+local function start(root, opts)
+    local project = state.project(root)
+    local target = project.target
+    local label = fn.fnamemodify(target, ":t")
+
+    -- SINGLE-FLIGHT: never a second child for the same project; one pending rerun at most.
+    if project.build.job then
+        project.build.pending = true
+        if not opts.silent then
+            notify(("%s %s is already building — one rerun queued"):format(config.icons.building, label))
+        end
+        return false
+    end
+
+    local name = root_mod.program(target) or config.builder
+    local mod, err = backend(name)
+    if not mod then
+        notify(err or "no builder", vim.log.levels.ERROR)
+        return false
+    end
+    local ok_bin, detail = mod.available()
+    if not ok_bin then
+        notify(detail or ("%s is unavailable"):format(name), vim.log.levels.ERROR)
+        return false
+    end
+
+    local out_dir = root_mod.out_dir(root)
+    if out_dir ~= vim.fs.dirname(root) and not uv.fs_stat(out_dir) then
+        -- latexmk refuses to create its own out-dir, so a first build into a fresh `build/` would
+        -- fail with an error that says nothing about the real cause.
+        fn.mkdir(out_dir, "p")
+    end
+
+    local argv = mod.argv({
+        target = target,
+        out_dir = (out_dir ~= vim.fs.dirname(root)) and out_dir or nil,
+        engine = root_mod.engine(target),
+    })
+
+    project.build.status = "building"
+    project.build.pending = false
+    project.build.output = {}
+    project.build.started = uv.hrtime()
+    project.build.finished = nil
+    project.build.code = nil
+
+    emit("LvimTexBuildStart", { root = root, target = target, builder = name })
+    if not opts.silent then
+        notify(("%s building %s"):format(config.icons.building, label))
+    end
+
+    local handle = vim.system(argv, {
+        cwd = mod.cwd({ target = target }),
+        env = mod.env(),
+        text = true,
+    }, function(result)
+        vim.schedule(function()
+            M._finish(root, name, result)
+        end)
+    end)
+
+    project.build.job = handle
+    project.build.pid = handle.pid
+    arm(project.build, handle, label)
+    return true
+end
+
+--- Compile the project `buf` belongs to — its current target, which is the root document unless the
+--- user toggled the target to the subfile they are editing (`:LvimTex main`).
+---@param buf integer?
+---@param opts { silent?: boolean }?
+---@return boolean started
+function M.build(buf, opts)
+    local root = root_mod.of(buf)
+    if not root then
+        notify("this buffer has no file on disk", vim.log.levels.WARN)
+        return false
+    end
+    return start(root, opts or {})
+end
+
+--- Post-run handling: parse the log, publish, report, and honour a pending rerun. Internal, but
+--- named on the module so the headless proofs can drive it with a captured result.
+---@param root string
+---@param builder string
+---@param result vim.SystemCompleted
+---@return nil
+function M._finish(root, builder, result)
+    local project = state.project(root)
+    local build = project.build
+
+    disarm(build)
+    build.job = nil
+    build.pid = nil
+    build.finished = uv.hrtime()
+    build.code = result.code
+    build.status = result.code == 0 and "ok" or "failed"
+
+    -- Keep a bounded tail of the raw output: enough for the build panel and `:LvimTex info`, never
+    -- the whole transcript of a big document.
+    local raw = vim.split((result.stdout or "") .. (result.stderr or ""), "\n", { plain = true })
+    local keep = config.output_lines
+    build.output = #raw > keep and vim.list_slice(raw, #raw - keep + 1, #raw) or raw
+
+    -- The `.fls` list only exists after a successful run; refresh the watch set from it now.
+    project.watch = nil
+
+    -- The log is named after the TARGET (a toggled subfile has its own), and lives in the build
+    -- directory while its relative paths stay relative to the target's own directory.
+    local items = log.parse(project.target, root_mod.out_dir(root))
+    publish(root, items)
+    quickfix(root, items)
+
+    local errors = 0
+    for _, item in ipairs(items) do
+        if item.severity == vim.diagnostic.severity.ERROR then
+            errors = errors + 1
+        end
+    end
+
+    emit("LvimTexBuildDone", {
+        root = root,
+        builder = builder,
+        code = result.code,
+        errors = errors,
+        duration = duration_ms(build),
+    })
+
+    local label = fn.fnamemodify(root, ":t")
+    if result.code == 0 then
+        notify(("%s %s built in %dms"):format(config.icons.ok, label, duration_ms(build)))
+    else
+        notify(
+            ("%s %s failed (%d error%s)"):format(config.icons.fail, label, errors, errors == 1 and "" or "s"),
+            vim.log.levels.WARN
+        )
+    end
+
+    if build.pending then
+        build.pending = false
+        -- The rerun is silent: the user already saw the first build's messages, and this one was
+        -- triggered by their save, not by a new request. It targets the same ROOT, never "the current
+        -- buffer", which may by now be an unrelated file.
+        start(root, { silent = true })
+    end
+end
+
+--- Stop the build of the project `buf` belongs to.
+---@param buf integer?
+---@return boolean stopped
+function M.stop(buf)
+    local root = root_mod.of(buf)
+    if not root then
+        return false
+    end
+    local build = state.project(root).build
+    if not build.job then
+        return false
+    end
+    -- SIGTERM lets latexmk clean up its own temporary state; the exit callback does the bookkeeping.
+    build.job:kill("sigterm")
+    build.pending = false
+    notify(("%s stopped %s"):format(config.icons.fail, fn.fnamemodify(root, ":t")))
+    return true
+end
+
+--- Stop every running build.
+---@return integer count
+function M.stop_all()
+    local count = 0
+    for _, root in ipairs(state.active_roots()) do
+        local build = state.project(root).build
+        if build.job then
+            build.job:kill("sigterm")
+            build.pending = false
+            count = count + 1
+        end
+    end
+    if count > 0 then
+        notify(("%s stopped %d build%s"):format(config.icons.fail, count, count == 1 and "" or "s"))
+    end
+    return count
+end
+
+--- Remove the build's auxiliary files (`full` also removes the produced PDF).
+---@param buf integer?
+---@param full boolean?
+---@return boolean started
+function M.clean(buf, full)
+    local root = root_mod.of(buf)
+    if not root then
+        return false
+    end
+    local name = root_mod.program(root) or config.builder
+    local mod = backend(name)
+    if not mod or not mod.clean_argv then
+        notify(("builder %q cannot clean"):format(name), vim.log.levels.WARN)
+        return false
+    end
+    local out_dir = root_mod.out_dir(root)
+    local argv = mod.clean_argv({
+        target = root,
+        out_dir = (out_dir ~= vim.fs.dirname(root)) and out_dir or nil,
+        full = full,
+    })
+    vim.system(argv, { cwd = mod.cwd({ target = root }), text = true }, function(result)
+        vim.schedule(function()
+            if result.code == 0 then
+                notify(("%s cleaned %s"):format(config.icons.ok, fn.fnamemodify(root, ":t")))
+            else
+                notify(
+                    ("%s clean failed: %s"):format(config.icons.fail, vim.trim(result.stderr or "")),
+                    vim.log.levels.WARN
+                )
+            end
+        end)
+    end)
+    return true
+end
+
+--- A one-line status for the project `buf` belongs to (used by `:LvimTex info` and the hud segment).
+---@param buf integer?
+---@return string
+function M.status_text(buf)
+    local root = root_mod.of(buf)
+    if not root then
+        return ""
+    end
+    local build = state.project(root).build
+    if build.status == "building" then
+        return config.icons.building
+    elseif build.status == "ok" then
+        return config.icons.ok
+    elseif build.status == "failed" then
+        return config.icons.fail
+    end
+    return ""
+end
+
+return M
