@@ -1,0 +1,608 @@
+{
+  "Article skeleton": {
+    "prefix": "article",
+    "body": [
+      "\\documentclass[${1:11pt}]{article}",
+      "\\usepackage[utf8]{inputenc}",
+      "\\usepackage{amsmath, amssymb}",
+      "",
+      "\\title{${2:Title}}",
+      "\\author{${3:Author}}",
+      "\\date{${4:\\today}}",
+      "",
+      "\\begin{document}",
+      "\\maketitle",
+      "",
+      "$0",
+      "",
+      "\\end{document}"
+    ],
+    "description": "A complete article: class, the usual packages, a title block and the document body"
+  },
+  "Beamer skeleton": {
+    "prefix": "beamer",
+    "body": [
+      "\\documentclass{beamer}",
+      "\\usetheme{${1:default}}",
+      "",
+      "\\title{${2:Title}}",
+      "\\author{${3:Author}}",
+      "",
+      "\\begin{document}",
+      "\\frame{\\titlepage}",
+      "",
+      "\\begin{frame}{${4:First slide}}",
+      "\t$0",
+      "\\end{frame}",
+      "",
+      "\\end{document}"
+    ],
+    "description": "A beamer presentation with a title slide and one frame"
+  },
+  "Document class": {
+    "prefix": "documentclass",
+    "body": [
+      "\\documentclass[${1:11pt}]{${2:article}}$0"
+    ],
+    "description": "The document class"
+  },
+  "Use package": {
+    "prefix": "usepackage",
+    "body": [
+      "\\usepackage[${1:options}]{${2:package}}$0"
+    ],
+    "description": "Load a package"
+  },
+  "Document environment": {
+    "prefix": "document",
+    "body": [
+      "\\begin{document}",
+      "$0",
+      "\\end{document}"
+    ],
+    "description": "The document environment"
+  },
+  "Part": {
+    "prefix": "part",
+    "body": [
+      "\\part{${1:Part}}\\label{prt:${2:key}}",
+      "$0"
+    ],
+    "description": "A \\part heading with its label"
+  },
+  "Chapter": {
+    "prefix": "chapter",
+    "body": [
+      "\\chapter{${1:Chapter}}\\label{cha:${2:key}}",
+      "$0"
+    ],
+    "description": "A \\chapter heading with its label"
+  },
+  "Section": {
+    "prefix": "section",
+    "body": [
+      "\\section{${1:Section}}\\label{sec:${2:key}}",
+      "$0"
+    ],
+    "description": "A \\section heading with its label"
+  },
+  "Subsection": {
+    "prefix": "subsection",
+    "body": [
+      "\\subsection{${1:Subsection}}\\label{sub:${2:key}}",
+      "$0"
+    ],
+    "description": "A \\subsection heading with its label"
+  },
+  "Subsubsection": {
+    "prefix": "subsubsection",
+    "body": [
+      "\\subsubsection{${1:Subsubsection}}\\label{ssub:${2:key}}",
+      "$0"
+    ],
+    "description": "A \\subsubsection heading with its label"
+  },
+  "Paragraph": {
+    "prefix": "paragraph",
+    "body": [
+      "\\paragraph{${1:Paragraph}}\\label{par:${2:key}}",
+      "$0"
+    ],
+    "description": "A \\paragraph heading with its label"
+  },
+  "Environment": {
+    "prefix": "begin",
+    "body": [
+      "\\begin{${1:environment}}",
+      "\t$0",
+      "\\end{$1}"
+    ],
+    "description": "Any environment — the name mirrors into the \\end"
+  },
+  "Itemize": {
+    "prefix": "itemize",
+    "body": [
+      "\\begin{itemize}",
+      "\t\\item $0",
+      "\\end{itemize}"
+    ],
+    "description": "A bulleted list"
+  },
+  "Enumerate": {
+    "prefix": "enumerate",
+    "body": [
+      "\\begin{enumerate}",
+      "\t\\item $0",
+      "\\end{enumerate}"
+    ],
+    "description": "A numbered list"
+  },
+  "Description": {
+    "prefix": "description",
+    "body": [
+      "\\begin{description}",
+      "\t\\item[${1:term}] $0",
+      "\\end{description}"
+    ],
+    "description": "A description list"
+  },
+  "Item": {
+    "prefix": "item",
+    "body": [
+      "\\item $0"
+    ],
+    "description": "One list item"
+  },
+  "Figure": {
+    "prefix": "figure",
+    "body": [
+      "\\begin{figure}[${1:htbp}]",
+      "\t\\centering",
+      "\t\\includegraphics[width=${2:0.8}\\textwidth]{${3:file}}",
+      "\t\\caption{${4:caption}}",
+      "\t\\label{fig:${5:key}}",
+      "\\end{figure}",
+      "$0"
+    ],
+    "description": "A figure with a graphic, a caption and a label"
+  },
+  "Table": {
+    "prefix": "table",
+    "body": [
+      "\\begin{table}[${1:htbp}]",
+      "\t\\centering",
+      "\t\\begin{tabular}{${2:ll}}",
+      "\t\t${3:a} & ${4:b} \\\\\\\\",
+      "\t\\end{tabular}",
+      "\t\\caption{${5:caption}}",
+      "\t\\label{tab:${6:key}}",
+      "\\end{table}",
+      "$0"
+    ],
+    "description": "A table with a tabular body, a caption and a label"
+  },
+  "Tabular": {
+    "prefix": "tabular",
+    "body": [
+      "\\begin{tabular}{${1:ll}}",
+      "\t${2:a} & ${3:b} \\\\\\\\",
+      "\\end{tabular}",
+      "$0"
+    ],
+    "description": "A tabular block"
+  },
+  "Center": {
+    "prefix": "center",
+    "body": [
+      "\\begin{center}",
+      "\t$0",
+      "\\end{center}"
+    ],
+    "description": "A centred block"
+  },
+  "Quote": {
+    "prefix": "quote",
+    "body": [
+      "\\begin{quote}",
+      "\t$0",
+      "\\end{quote}"
+    ],
+    "description": "A quotation"
+  },
+  "Verbatim": {
+    "prefix": "verbatim",
+    "body": [
+      "\\begin{verbatim}",
+      "$0",
+      "\\end{verbatim}"
+    ],
+    "description": "Verbatim text"
+  },
+  "Code listing": {
+    "prefix": "lstlisting",
+    "body": [
+      "\\begin{lstlisting}[language=${1:C}]",
+      "$0",
+      "\\end{lstlisting}"
+    ],
+    "description": "A listings code block"
+  },
+  "Minted block": {
+    "prefix": "minted",
+    "body": [
+      "\\begin{minted}{${1:python}}",
+      "$0",
+      "\\end{minted}"
+    ],
+    "description": "A minted code block"
+  },
+  "Frame": {
+    "prefix": "frame",
+    "body": [
+      "\\begin{frame}{${1:title}}",
+      "\t$0",
+      "\\end{frame}"
+    ],
+    "description": "A beamer frame"
+  },
+  "Abstract": {
+    "prefix": "abstract",
+    "body": [
+      "\\begin{abstract}",
+      "\t$0",
+      "\\end{abstract}"
+    ],
+    "description": "The abstract"
+  },
+  "Equation": {
+    "prefix": "equation",
+    "body": [
+      "\\begin{equation}",
+      "\t\\label{eq:${1:key}}",
+      "\t$0",
+      "\\end{equation}"
+    ],
+    "description": "A numbered equation with a label"
+  },
+  "Equation (unnumbered)": {
+    "prefix": "equation*",
+    "body": [
+      "\\begin{equation*}",
+      "\t$0",
+      "\\end{equation*}"
+    ],
+    "description": "An unnumbered equation"
+  },
+  "Align": {
+    "prefix": "align",
+    "body": [
+      "\\begin{align}",
+      "\t${1:a} &= ${2:b} \\\\\\\\",
+      "\t$0",
+      "\\end{align}"
+    ],
+    "description": "Aligned equations"
+  },
+  "Align (unnumbered)": {
+    "prefix": "align*",
+    "body": [
+      "\\begin{align*}",
+      "\t${1:a} &= ${2:b} \\\\\\\\",
+      "\t$0",
+      "\\end{align*}"
+    ],
+    "description": "Unnumbered aligned equations"
+  },
+  "Gather": {
+    "prefix": "gather",
+    "body": [
+      "\\begin{gather}",
+      "\t$0",
+      "\\end{gather}"
+    ],
+    "description": "Gathered equations"
+  },
+  "Cases": {
+    "prefix": "cases",
+    "body": [
+      "\\begin{cases}",
+      "\t${1:a} & \\text{if } ${2:condition} \\\\\\\\",
+      "\t${3:b} & \\text{otherwise}",
+      "\\end{cases}",
+      "$0"
+    ],
+    "description": "A cases block"
+  },
+  "Matrix (parentheses)": {
+    "prefix": "pmatrix",
+    "body": [
+      "\\begin{pmatrix}",
+      "\t${1:a} & ${2:b} \\\\\\\\",
+      "\t${3:c} & ${4:d}",
+      "\\end{pmatrix}",
+      "$0"
+    ],
+    "description": "A 2x2 matrix in parentheses"
+  },
+  "Matrix (brackets)": {
+    "prefix": "bmatrix",
+    "body": [
+      "\\begin{bmatrix}",
+      "\t${1:a} & ${2:b} \\\\\\\\",
+      "\t${3:c} & ${4:d}",
+      "\\end{bmatrix}",
+      "$0"
+    ],
+    "description": "A 2x2 matrix in brackets"
+  },
+  "Theorem": {
+    "prefix": "theorem",
+    "body": [
+      "\\begin{theorem}[${1:name}]",
+      "\t\\label{thm:${2:key}}",
+      "\t$0",
+      "\\end{theorem}"
+    ],
+    "description": "A theorem with a label"
+  },
+  "Lemma": {
+    "prefix": "lemma",
+    "body": [
+      "\\begin{lemma}",
+      "\t$0",
+      "\\end{lemma}"
+    ],
+    "description": "A lemma"
+  },
+  "Definition": {
+    "prefix": "definition",
+    "body": [
+      "\\begin{definition}",
+      "\t$0",
+      "\\end{definition}"
+    ],
+    "description": "A definition"
+  },
+  "Proof": {
+    "prefix": "proof",
+    "body": [
+      "\\begin{proof}",
+      "\t$0",
+      "\\end{proof}"
+    ],
+    "description": "A proof"
+  },
+  "Inline maths": {
+    "prefix": "mk",
+    "body": [
+      "\\$${1}\\$$0"
+    ],
+    "description": "Inline maths ($…$)"
+  },
+  "Display maths": {
+    "prefix": "dm",
+    "body": [
+      "\\[",
+      "\t$0",
+      "\\]"
+    ],
+    "description": "Display maths (\\[…\\])"
+  },
+  "Fraction": {
+    "prefix": "frac",
+    "body": [
+      "\\frac{${1:a}}{${2:b}}$0"
+    ],
+    "description": "A fraction"
+  },
+  "Display fraction": {
+    "prefix": "dfrac",
+    "body": [
+      "\\dfrac{${1:a}}{${2:b}}$0"
+    ],
+    "description": "A display-style fraction"
+  },
+  "Square root": {
+    "prefix": "sqrt",
+    "body": [
+      "\\sqrt{${1:x}}$0"
+    ],
+    "description": "A square root"
+  },
+  "Nth root": {
+    "prefix": "nroot",
+    "body": [
+      "\\sqrt[${1:n}]{${2:x}}$0"
+    ],
+    "description": "An nth root"
+  },
+  "Sum": {
+    "prefix": "sum",
+    "body": [
+      "\\sum_{${1:i=1}}^{${2:n}} $0"
+    ],
+    "description": "A sum with limits"
+  },
+  "Product": {
+    "prefix": "prod",
+    "body": [
+      "\\prod_{${1:i=1}}^{${2:n}} $0"
+    ],
+    "description": "A product with limits"
+  },
+  "Integral": {
+    "prefix": "int",
+    "body": [
+      "\\int_{${1:a}}^{${2:b}} ${3:f(x)} \\mathrm{d}x$0"
+    ],
+    "description": "A definite integral"
+  },
+  "Limit": {
+    "prefix": "lim",
+    "body": [
+      "\\lim_{${1:n} \\to ${2:\\infty}} $0"
+    ],
+    "description": "A limit"
+  },
+  "Binomial": {
+    "prefix": "binom",
+    "body": [
+      "\\binom{${1:n}}{${2:k}}$0"
+    ],
+    "description": "A binomial coefficient"
+  },
+  "Scaled delimiters": {
+    "prefix": "lr",
+    "body": [
+      "\\left${1:(} $2 \\right${3:)}$0"
+    ],
+    "description": "A \\left…\\right pair"
+  },
+  "Text in maths": {
+    "prefix": "tx",
+    "body": [
+      "\\text{${1:text}}$0"
+    ],
+    "description": "Prose inside a formula"
+  },
+  "Overline": {
+    "prefix": "overline",
+    "body": [
+      "\\overline{${1:x}}$0"
+    ],
+    "description": "An overline"
+  },
+  "Vector": {
+    "prefix": "vec",
+    "body": [
+      "\\vec{${1:v}}$0"
+    ],
+    "description": "A vector"
+  },
+  "Label": {
+    "prefix": "label",
+    "body": [
+      "\\label{${1:key}}$0"
+    ],
+    "description": "A label"
+  },
+  "Reference": {
+    "prefix": "ref",
+    "body": [
+      "\\ref{${1:key}}$0"
+    ],
+    "description": "A reference"
+  },
+  "Equation reference": {
+    "prefix": "eqref",
+    "body": [
+      "\\eqref{${1:eq:key}}$0"
+    ],
+    "description": "An equation reference"
+  },
+  "Clever reference": {
+    "prefix": "cref",
+    "body": [
+      "\\cref{${1:key}}$0"
+    ],
+    "description": "A cleveref reference"
+  },
+  "Citation": {
+    "prefix": "cite",
+    "body": [
+      "\\cite{${1:key}}$0"
+    ],
+    "description": "A citation"
+  },
+  "Citation (parenthetical)": {
+    "prefix": "citep",
+    "body": [
+      "\\citep{${1:key}}$0"
+    ],
+    "description": "A parenthetical citation (natbib)"
+  },
+  "Footnote": {
+    "prefix": "footnote",
+    "body": [
+      "\\footnote{${1:text}}$0"
+    ],
+    "description": "A footnote"
+  },
+  "URL": {
+    "prefix": "url",
+    "body": [
+      "\\url{${1:https://}}$0"
+    ],
+    "description": "A bare URL"
+  },
+  "Hyperlink": {
+    "prefix": "href",
+    "body": [
+      "\\href{${1:https://}}{${2:text}}$0"
+    ],
+    "description": "A hyperlink"
+  },
+  "Include graphics": {
+    "prefix": "includegraphics",
+    "body": [
+      "\\includegraphics[width=${1:0.8}\\textwidth]{${2:file}}$0"
+    ],
+    "description": "Include a graphic"
+  },
+  "Input file": {
+    "prefix": "input",
+    "body": [
+      "\\input{${1:file}}$0"
+    ],
+    "description": "Input another file"
+  },
+  "Include file": {
+    "prefix": "include",
+    "body": [
+      "\\include{${1:file}}$0"
+    ],
+    "description": "Include another file"
+  },
+  "Bibliography resource": {
+    "prefix": "addbibresource",
+    "body": [
+      "\\addbibresource{${1:refs.bib}}$0"
+    ],
+    "description": "A biblatex bibliography"
+  },
+  "Print bibliography": {
+    "prefix": "printbibliography",
+    "body": [
+      "\\printbibliography$0"
+    ],
+    "description": "Print the biblatex bibliography"
+  },
+  "Bold": {
+    "prefix": "textbf",
+    "body": [
+      "\\textbf{${1:text}}$0"
+    ],
+    "description": "Bold text"
+  },
+  "Italic": {
+    "prefix": "textit",
+    "body": [
+      "\\textit{${1:text}}$0"
+    ],
+    "description": "Italic text"
+  },
+  "Typewriter": {
+    "prefix": "texttt",
+    "body": [
+      "\\texttt{${1:text}}$0"
+    ],
+    "description": "Typewriter text"
+  },
+  "Emphasis": {
+    "prefix": "emph",
+    "body": [
+      "\\emph{${1:text}}$0"
+    ],
+    "description": "Emphasised text"
+  }
+}
