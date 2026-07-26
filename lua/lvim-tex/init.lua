@@ -16,8 +16,19 @@ local config = require("lvim-tex.config")
 local state = require("lvim-tex.state")
 local root_mod = require("lvim-tex.root")
 local build = require("lvim-tex.build")
+local selection = require("lvim-tex.selection")
 local rules = require("lvim-tex.log.rules")
 local viewer = require("lvim-tex.viewer")
+local textobjects = require("lvim-tex.textobjects")
+local motion = require("lvim-tex.motion")
+local match = require("lvim-tex.match")
+local edit = require("lvim-tex.edit")
+local syntax = require("lvim-tex.syntax")
+local conceal = require("lvim-tex.conceal")
+local completion = require("lvim-tex.completion")
+local insert = require("lvim-tex.insert")
+local imaps = require("lvim-tex.imaps")
+local tex_snippets = require("lvim-tex.snippets")
 
 local ok_utils, utils = pcall(require, "lvim-utils.utils")
 
@@ -28,6 +39,61 @@ local M = {}
 
 ---@type integer?  the plugin's augroup, created once by setup()
 local augroup = nil
+
+---@type uv.uv_timer_t?  debounce for the cursor-follow forward search
+local follow_timer = nil
+
+--- Release the follow debounce (a reload or a second setup must not leak the timer).
+---@return nil
+local function release_follow()
+    if follow_timer then
+        follow_timer:stop()
+        if not follow_timer:is_closing() then
+            follow_timer:close()
+        end
+        follow_timer = nil
+    end
+end
+
+--- Move the viewer to where the cursor is, after it has been still.
+---
+--- Deliberately narrow: it never OPENS a viewer (that is `,lv`), it does nothing when none is open,
+--- and it does nothing outside a TeX buffer that belongs to a project. A forward search costs a
+--- `synctex` process, so it is debounced rather than sent per cursor move — and the timer is a single
+--- shared one, because only the LAST position matters.
+---@return nil
+local function follow_cursor()
+    if not config.synctex.follow_cursor then
+        return
+    end
+    -- No filetype check: the autocmd's own `*.tex`/`*.ltx`/`*.bib` pattern is the gate, and a second
+    -- one on `&filetype` would make this unprovable outside a UI (detection is off under
+    -- `nvim --headless -u NONE`, so the guard could only ever be satisfied by hand).
+    local buf = api.nvim_get_current_buf()
+    local root = root_mod.of(buf)
+    if not root or not viewer.is_alive(root) then
+        return
+    end
+    local file = fn.fnamemodify(api.nvim_buf_get_name(buf), ":p")
+    local pos = api.nvim_win_get_cursor(0)
+    release_follow()
+    local timer = vim.uv.new_timer()
+    if not timer then
+        return
+    end
+    follow_timer = timer
+    timer:start(
+        math.max(0, config.synctex.follow_debounce or 400),
+        0,
+        vim.schedule_wrap(function()
+            release_follow()
+            -- The viewer may have been closed while the timer ran; `forward` re-resolves it anyway,
+            -- and a failure here is silent BY DESIGN — a follow the user did not ask for must never
+            -- put a message on their screen.
+            viewer.forward(root, file, pos[1], pos[2] + 1, function() end)
+        end)
+    )
+end
 
 --- Notify, gated by `config.notify`.
 ---@param msg string
@@ -48,8 +114,35 @@ function M.toggle_main()
         return
     end
     local root = root_mod.of(0)
+    -- The build now writes a different PDF, so an open viewer has to follow it — otherwise it keeps
+    -- showing the other document and looks like the toggle did nothing.
+    if root then
+        viewer.retarget(root)
+    end
     local kind = (target == root) and "root document" or "this subfile"
-    notify(("%s compile target: %s (%s)"):format(config.icons.section, fn.fnamemodify(target, ":t"), kind))
+    -- A target with no PDF has nothing to show, and the user toggled precisely in order to see it — so
+    -- BUILD it (`root.build_on_toggle`). Reporting the state and waiting would demand a save of a file
+    -- nobody changed, purely to make the tool act. A target that already has a PDF is shown as it is;
+    -- the next save rebuilds it like any other.
+    local missing = root ~= nil and fn.filereadable(root_mod.pdf(root, target)) ~= 1
+    local building = missing and config.root.build_on_toggle == true
+    notify(
+        ("%s compile target: %s (%s)%s"):format(
+            config.icons.section,
+            fn.fnamemodify(target, ":t"),
+            kind,
+            building and "  (building it now)" or (missing and "  (not built yet)" or "")
+        )
+    )
+    if building then
+        -- The build opens the viewer itself when `viewer.open_on_start` allows it.
+        build.build(0)
+    elseif root then
+        -- Nothing to build, so the only thing left to do about a toggle is to SHOW the file it points
+        -- at. `show` is a no-op when a viewer is already up or when the user has not asked for one to
+        -- be opened unprompted.
+        viewer.show(root)
+    end
 end
 
 --- Open the quickfix list holding the last build's entries.
@@ -112,6 +205,10 @@ end
 ---@return nil
 function M.reload()
     state.reset()
+    -- The conceal maps are built from config + the shipped data; a reload re-reads the project AND
+    -- whatever the user changed in the config since setup.
+    conceal.refresh()
+    imaps.refresh()
     notify("project data reloaded")
 end
 
@@ -143,9 +240,9 @@ function M.info()
         return {}
     end
     local project = state.project(root)
-    local engine = root_mod.engine(root)
+    local engine = root_mod.engine_for(root, project.target)
     local graph = root_mod.graph(root)
-    local watch = root_mod.watch(root, project.target, root_mod.out_dir(root))
+    local watch = root_mod.watch(root, project.target, root_mod.out_dir(root, project.target))
     local errors, warnings = 0, 0
     for _, item in ipairs(project.diags or {}) do
         if item.severity == vim.diagnostic.severity.ERROR then
@@ -158,8 +255,11 @@ function M.info()
     local lines = {
         ("root      %s"):format(root),
         ("target    %s"):format(project.target),
-        ("builder   %s%s"):format(root_mod.program(root) or config.builder, engine and (" (" .. engine .. ")") or ""),
-        ("out dir   %s"):format(root_mod.out_dir(root)),
+        ("builder   %s%s"):format(
+            root_mod.program_for(root, project.target) or config.builder,
+            engine and (" (" .. engine .. ")") or ""
+        ),
+        ("out dir   %s"):format(root_mod.out_dir(root, project.target)),
         ("pdf       %s%s"):format(
             fn.fnamemodify(root_mod.pdf(root, project.target), ":~"),
             fn.filereadable(root_mod.pdf(root, project.target)) == 1 and "" or "  (not built)"
@@ -254,6 +354,11 @@ local COMMANDS = {
     build = function()
         build.build(0)
     end,
+    selection = function()
+        -- From the command line the marks are the selection: `:'<,'>LvimTex selection`, or the last
+        -- one if visual mode has already been left.
+        selection.build()
+    end,
     continuous = function()
         build.toggle_continuous(0)
     end,
@@ -287,6 +392,43 @@ local COMMANDS = {
     end,
     reload = function()
         M.reload()
+    end,
+    toc = function(arg)
+        local layouts = { split = true, float = true, area = true, bottom = true }
+        require("lvim-tex.outline").toggle({ layout = layouts[arg or ""] and arg or nil })
+    end,
+    files = function()
+        require("lvim-tex.pickers").files(0)
+    end,
+    labels = function()
+        require("lvim-tex.pickers").labels(0)
+    end,
+    cites = function()
+        require("lvim-tex.pickers").cites(0)
+    end,
+    cite = function(arg)
+        require("lvim-tex.cite").open(arg)
+    end,
+    count = function(arg)
+        require("lvim-tex.count").count(0, arg)
+    end,
+    doc = function(arg)
+        require("lvim-tex.doc").doc(arg)
+    end,
+    conceal = function(arg)
+        conceal.toggle(0, arg)
+    end,
+    imaps = function(arg)
+        if arg == "toggle" or arg == "on" or arg == "off" then
+            local on = imaps.toggle(arg ~= "off" and (arg == "on" or nil))
+            notify(("maths abbreviations %s"):format(on and "on" or "off"))
+        else
+            imaps.list()
+        end
+    end,
+    matchparen = function()
+        local on = match.toggle_highlight()
+        notify(("matching-pair highlight %s"):format(on and "on" or "off"))
     end,
 }
 
@@ -331,6 +473,39 @@ local function attach_keys(buf)
         M.view()
     end, "open the PDF viewer")
     map(keys.reload, COMMANDS.reload, "reload the project data")
+    map(keys.conceal, function()
+        conceal.toggle(buf)
+    end, "toggle conceal")
+    map(keys.imaps, function()
+        imaps.list()
+    end, "list the maths abbreviations")
+    map(keys.outline, COMMANDS.toc, "toggle the table of contents")
+    map(keys.files, COMMANDS.files, "find a file in the project")
+    map(keys.labels, COMMANDS.labels, "find a label in the project")
+    map(keys.cites, COMMANDS.cites, "find a citation in the project")
+    map(keys.cite, function()
+        require("lvim-tex.cite").open(nil, buf)
+    end, "citation actions for the key under the cursor")
+    map(keys.count, function()
+        require("lvim-tex.count").count(buf)
+    end, "count the words in the document")
+    map(keys.doc, function()
+        require("lvim-tex.doc").doc(nil, buf)
+    end, "documentation for the package under the cursor")
+
+    -- Visual mode: the SELECTION compile — the one map that is not normal-mode, so it does not go
+    -- through `map` above. It fires while the selection is still up, which is what lvim-tex.selection
+    -- expects: it reads the LIVE visual positions, because `'<` / `'>` are only written when visual
+    -- mode ends.
+    if keys.build_selection and keys.build_selection ~= "" then
+        vim.keymap.set("x", prefix .. keys.build_selection, function()
+            selection.build()
+        end, {
+            buffer = buf,
+            desc = "lvim-tex: compile the selection as a standalone document",
+            silent = true,
+        })
+    end
 end
 
 --- Attach to a TeX buffer: keymaps now, the per-buffer autocmds of later phases here too.
@@ -342,6 +517,16 @@ local function attach(buf)
     end
     vim.b[buf].lvim_tex_attached = true
     attach_keys(buf)
+    -- Each of these is buffer-local, idempotent, and gates itself on the buffer's own grammar, so a
+    -- `bib` buffer installs only what applies to it. `gf` and `%` are UNPREFIXED, which is why the
+    -- modules own their maps instead of going through `attach_keys`.
+    require("lvim-tex.nav").attach(buf)
+    textobjects.attach(buf)
+    motion.attach(buf)
+    match.attach(buf)
+    edit.attach(buf)
+    insert.attach(buf)
+    syntax.attach(buf)
 end
 
 --- Set up lvim-tex. Merges `opts` into the live config, creates `:LvimTex`, and attaches to every
@@ -360,6 +545,20 @@ function M.setup(opts)
     end
 
     augroup = api.nvim_create_augroup("LvimTex", { clear = true })
+
+    -- Conceal owns a WINDOW-scoped effect and therefore its own autocmds (a buffer shown in a second
+    -- window is not something a buffer-attach hook can express), exactly as a panel registers itself
+    -- with the shared cursor module.
+    conceal.setup()
+
+    -- The completion GAP-FILL (K1/K2/K5): one lvim-cmp source for the commands texlab does not
+    -- serve. It registers as a fallback for the language server, so it can never double up on it.
+    completion.setup()
+
+    -- The maths abbreviations live in lvim-snippets as postfix rules and the snippet collection as an
+    -- extra collection root there: both are registrations, not per-buffer state, so they happen once.
+    imaps.setup()
+    tex_snippets.setup()
 
     api.nvim_create_autocmd("FileType", {
         group = augroup,
@@ -395,6 +594,17 @@ function M.setup(opts)
                 function() end
             )
         end,
+    })
+
+    -- Follow the cursor with the viewer. `CursorMoved` alone would miss a jump made in normal mode
+    -- that lands without moving (a `:` command), and `CursorHold` alone waits for 'updatetime' —
+    -- which is the user's setting for something else entirely. Both feed the same debounce, so the
+    -- cost is one forward search per pause however the cursor got there.
+    api.nvim_create_autocmd({ "CursorMoved", "CursorHold" }, {
+        group = augroup,
+        pattern = { "*.tex", "*.ltx", "*.bib" },
+        desc = "lvim-tex: keep the viewer on the paragraph the cursor is in",
+        callback = follow_cursor,
     })
 
     -- A magic `% !TEX root` comment can be added or changed at any time, and the root it names
@@ -438,7 +648,14 @@ function M.setup(opts)
         complete = function(arg, line)
             local words = vim.split(vim.trim(line), "%s+")
             if #words > 2 or (#words == 2 and arg == "") then
-                local ARGS = { clean = { "full" }, view = { "close" } }
+                local ARGS = {
+                    clean = { "full" },
+                    view = { "close" },
+                    toc = { "split", "float", "area", "bottom" },
+                    conceal = vim.tbl_keys(config.conceal.groups),
+                    count = { "file", "selection" },
+                    imaps = { "toggle", "on", "off" },
+                }
                 return ARGS[words[2]] or {}
             end
             local names = vim.tbl_keys(COMMANDS)

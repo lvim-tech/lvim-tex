@@ -45,6 +45,48 @@ local function check_builder(health)
     else
         health.error(detail or ("builder %s is unavailable"):format(name))
     end
+
+    -- A backend's LIMITS are data on the module (`supports`), so health states them rather than
+    -- leaving the user to discover them as a build that silently produced nothing.
+    local supports = mod.supports or {}
+    if supports.oneshot == false then
+        health.warn(
+            ("%s is an engine AND a viewer in one long-lived process: it writes no PDF, produces no log and never exits, so it cannot be run as a build"):format(
+                name
+            ),
+            { "set config.builder to latexmk, tectonic, latexrun or arara for the batch build" }
+        )
+    end
+    if supports.out_dir == false and config.out_dir and config.out_dir ~= "" then
+        health.warn(
+            ("%s cannot write into an output directory — it builds beside the source, but out_dir = %q"):format(
+                name,
+                config.out_dir
+            ),
+            { "set out_dir = nil while this builder is active, so the log, the PDF and forward search agree" }
+        )
+    end
+    if supports.clean == "all" then
+        health.info(
+            ("%s has ONE clean action: `:LvimTex clean` and `:LvimTex clean full` both remove the PDF"):format(name)
+        )
+    elseif supports.clean == false then
+        health.info(("%s has no clean action of its own — `:LvimTex clean` says so"):format(name))
+    end
+end
+
+--- Where a selection compile (`,lL`) puts its scratch project, and whether it will be shown.
+---@param health table
+---@return nil
+local function check_selection(health)
+    local dir = config.selection.dir
+    if not dir or dir == "" then
+        dir = fn.stdpath("cache") .. "/lvim-tex/selection"
+    end
+    health.info(("selection compile: scratch projects under %s"):format(fn.fnamemodify(dir, ":~")))
+    if not config.selection.view then
+        health.info("selection.view = false — a compiled selection is built but not shown")
+    end
 end
 
 --- Report the treesitter grammars, with the install line when one is missing.
@@ -299,16 +341,253 @@ local function check_synctex(health)
     end
 end
 
+--- Report what the navigation layer can and cannot resolve in THIS project: the structure it reads,
+--- and — the actionable part — every include that resolves to nothing, which is exactly what makes a
+--- TOC row or a `gf` fail.
+---@param health table
+---@return nil
+local function check_navigation(health)
+    if config.nav.kpsewhich and fn.executable(config.nav.kpsewhich) == 1 then
+        health.ok(
+            ("%s found — `gf` on \\usepackage / \\documentclass opens the distribution's file"):format(
+                config.nav.kpsewhich
+            )
+        )
+    else
+        health.info("kpsewhich not found — `gf` resolves project files only (it ships with every TeX distribution)")
+    end
+    local buf = tex_buffer()
+    local root = buf and root_mod.of(buf) or nil
+    if not root then
+        return
+    end
+    local structure = require("lvim-tex.structure")
+    local entries = structure.document(root)
+    local counts, missing = { section = 0, include = 0, label = 0, todo = 0 }, {}
+    for _, entry in ipairs(entries) do
+        counts[entry.kind] = (counts[entry.kind] or 0) + 1
+        if entry.kind == "include" and not entry.target then
+            missing[#missing + 1] = ("%s (%s:%d)"):format(entry.title, fn.fnamemodify(entry.file, ":t"), entry.lnum)
+        end
+    end
+    health.info(
+        ("structure: %d sections, %d includes, %d labels, %d todos"):format(
+            counts.section,
+            counts.include,
+            counts.label,
+            counts.todo
+        )
+    )
+    if #missing > 0 then
+        health.warn("includes that resolve to no file:", missing)
+    end
+end
+
+--- The editing half (E1-E7, S6-S8): the queries this plugin ships have to RESOLVE (they live under
+--- `after/`, which is a runtimepath entry of its own), and the query indent needs lvim-ts's engine.
+---@param health table
+---@return nil
+local function check_editing(health)
+    for _, name in ipairs({ "textobjects", "indents", "injections" }) do
+        if vim.treesitter.query.get("latex", name) then
+            health.ok(("latex %s query resolves"):format(name))
+        else
+            health.warn(
+                ("latex %s query does not resolve — lvim-tex's after/queries are not on the runtimepath"):format(name)
+            )
+        end
+    end
+    local report = require("lvim-tex.syntax").report()
+    if report.folds_query then
+        health.ok(
+            ("folding: %s (fold.enabled = %s)"):format(report.fold and "on" or "off", tostring(config.fold.enabled))
+        )
+    else
+        health.warn("the latex folds query is missing — folding cannot be enabled")
+    end
+    if report.engine then
+        health.ok(("indent: %s (query + lvim-ts engine)"):format(report.indent and "on" or "off"))
+    else
+        health.warn("lvim-ts is not available — the shipped indents query has no engine to run in", {
+            "install lvim-ts; without it 'indentexpr' falls back to Neovim's own tex indent",
+        })
+    end
+    health.ok(("matching-pair highlight: %s"):format(config.matchparen.enabled and "on" or "off"))
+end
+
+--- Conceal: whether it can run at all (it is treesitter-driven, so no latex grammar means no
+--- conceal), what is switched on, and how many commands the merged maps cover. A swallowed renderer
+--- error is reported here rather than breaking a redraw, which is why it is kept at all.
+---@param health table
+---@return nil
+local function check_conceal(health)
+    local status = require("lvim-tex.conceal").status(tex_buffer() or 0)
+    if not status.parser then
+        health.warn("conceal needs the latex grammar, which is not installed", {
+            'add "latex" to lvim-ts `ensure_installed`',
+        })
+        return
+    end
+    local on, off = {}, {}
+    for group, enabled in pairs(status.groups) do
+        table.insert(enabled and on or off, group)
+    end
+    table.sort(on)
+    table.sort(off)
+    health.ok(("conceal: %d commands over %d groups"):format(status.commands, #on))
+    health.info(("groups on:  %s"):format(#on > 0 and table.concat(on, ", ") or "none"))
+    health.info(("groups off: %s"):format(#off > 0 and table.concat(off, ", ") or "none"))
+    health.info(
+        ("conceallevel %d, concealcursor %q while a TeX buffer is displayed"):format(status.level, status.cursor)
+    )
+    if not config.conceal.enabled then
+        health.info("conceal.enabled = false — turn it on per buffer with `:LvimTex conceal`")
+    end
+    if status.error then
+        health.error(("the conceal renderer failed: %s"):format(status.error))
+    end
+end
+
+--- Completion (K1-K6) and the gap-fill. Those rows are DELEGATED, so the first honest answer is
+--- whether texlab actually REACHED the user's document — `check_lsp` says the binary exists, this
+--- says it attached. Then the narrow strip lvim-tex serves itself, named command by command, so
+--- "why does \nameref complete but \zref not" has an answer that is not the source code.
+---@param health table
+---@return nil
+local function check_completion(health)
+    local completion = require("lvim-tex.completion")
+    local attached, name = completion.server(tex_buffer())
+    if attached then
+        health.ok(("%s is attached — cite, label, command, package, glossary and path completion"):format(name))
+    elseif completion.server_installed() then
+        health.warn("texlab is installed but has not attached to the TeX buffer — completion will be empty", {
+            "open a .tex file; lvim-lang's latex provider starts texlab on FileType",
+        })
+    end
+    if not config.completion.enabled then
+        health.info("completion.enabled = false — the gap-fill source is not registered")
+        return
+    end
+    if not pcall(require, "lvim-cmp") then
+        health.info("lvim-cmp is not installed — the gap-fill source has nowhere to register")
+        return
+    end
+    local served = completion.served()
+    local kinds = vim.tbl_keys(served)
+    table.sort(kinds)
+    local total = 0
+    for _, kind in ipairs(kinds) do
+        total = total + #served[kind]
+    end
+    health.ok(("completion gap-fill: %d commands texlab does not serve, over %d data sets"):format(total, #kinds))
+    for _, kind in ipairs(kinds) do
+        local commands = vim.tbl_map(function(command)
+            return "\\" .. command
+        end, served[kind])
+        health.info(("  %-10s %s"):format(kind, table.concat(commands, " ")))
+    end
+    health.info(("it runs ONLY as a fallback for: %s"):format(table.concat(config.completion.fallback_for or {}, ", ")))
+end
+
+--- texcount and texdoc — the two external tools the word count (M2) and the documentation lookup
+--- (M1) drive. Neither is fatal: every other feature works without them.
+---@param health table
+---@return nil
+local function check_tools(health)
+    if fn.executable(config.count.bin) == 1 then
+        health.ok(
+            ("%s found — `:LvimTex count` runs `%s`"):format(
+                config.count.bin,
+                table.concat(vim.list_extend({ config.count.bin }, config.count.args or {}), " ")
+            )
+        )
+    else
+        health.warn(("%s is not on PATH — `:LvimTex count` cannot run"):format(config.count.bin), {
+            "it ships with every TeX distribution (TeX Live: the texlive-binextra collection)",
+        })
+    end
+    if fn.executable(config.docs.bin) == 1 then
+        health.ok(("%s found — `:LvimTex doc`"):format(config.docs.bin))
+    else
+        health.warn(("%s is not on PATH — `:LvimTex doc` cannot run"):format(config.docs.bin), {
+            "it ships with every TeX distribution (TeX Live: the texlive-texdoc package)",
+        })
+    end
+end
+
+--- The maths abbreviations (E9) and the shipped snippet collection (E10). Both live in lvim-snippets
+--- — the rules as postfix rules, the collection as a registered root — so "why does nothing expand"
+--- has four separate answers, and this separates them: no lvim-snippets, its postfix engine off,
+--- `imaps.enabled = false`, or a trigger shadowed by a shorter one.
+---@param health table
+---@return nil
+local function check_imaps(health)
+    local imaps = require("lvim-tex.imaps")
+    local stats = imaps.stats()
+    if not stats.snippets then
+        health.warn(
+            "lvim-snippets is not installed — the maths abbreviations and the snippet collection do nothing",
+            {
+                "install lvim-snippets (it owns the expansion engine; lvim-tex only registers into it)",
+            }
+        )
+    elseif not stats.enabled then
+        health.info(
+            ("imaps.enabled = false — %d abbreviations ready, `:LvimTex imaps` lists them"):format(stats.total)
+        )
+    elseif not stats.engine then
+        health.warn("lvim-snippets' postfix engine is off, so no abbreviation can fire", {
+            'require("lvim-snippets").setup({ postfix = { enabled = true } })',
+        })
+    else
+        health.ok(
+            ("maths abbreviations: %d registered, leader %q, expanding inside maths only"):format(
+                stats.installed,
+                stats.leader
+            )
+        )
+    end
+    for _, pair in ipairs(stats.shadowed) do
+        health.warn(
+            ("the trigger %q can never fire: %q is a prefix of it and expands first"):format(pair[2], pair[1]),
+            { "abbreviations auto-expand, so no trigger may be a prefix of another — rename or disable one" }
+        )
+    end
+
+    local collection = require("lvim-tex.snippets").stats()
+    if not config.snippets.enabled then
+        health.info("snippets.enabled = false — the shipped tex collection is not registered")
+    elseif collection.registered then
+        health.ok(("snippet collection registered: %s"):format(collection.dir))
+        health.info(
+            ("%d `tex` snippets reachable through lvim-snippets (this collection plus your own roots)"):format(
+                collection.records
+            )
+        )
+    else
+        health.warn(("the shipped snippet collection is not registered: %s"):format(collection.reason or "unknown"), {
+            "it registers itself from setup(); check that lvim-snippets is installed and up to date",
+        })
+    end
+end
+
 --- :checkhealth lvim-tex
 ---@return nil
 function M.check()
     local health = vim.health
     health.start("lvim-tex")
     check_builder(health)
+    check_selection(health)
     check_grammars(health)
     check_lsp(health)
+    check_completion(health)
     check_rules(health)
+    check_navigation(health)
+    check_editing(health)
     check_config(health)
+    check_conceal(health)
+    check_imaps(health)
+    check_tools(health)
     health.start("lvim-tex: viewers")
     check_viewers(health)
     check_synctex(health)

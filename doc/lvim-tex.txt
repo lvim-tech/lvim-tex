@@ -9,6 +9,11 @@ CONTENTS                                                     *lvim-tex-contents*
     4. The project model .................... |lvim-tex-project|
     5. Building ............................. |lvim-tex-building|
     6. Diagnostics .......................... |lvim-tex-diagnostics|
+    5a. Structure & navigation .............. |lvim-tex-navigation|
+    5b. Editing ............................. |lvim-tex-editing|
+    5c. Conceal ............................. |lvim-tex-conceal|
+    5d. Completion & tools .................. |lvim-tex-completion|
+    5e. Maths abbreviations & snippets ...... |lvim-tex-imaps|
     6a. Viewing ............................. |lvim-tex-viewing|
     6b. SyncTeX ............................. |lvim-tex-synctex|
     7. Adding a log rule .................... |lvim-tex-log-rules|
@@ -74,7 +79,23 @@ own. Set `root.subfiles = "subfile"` to compile the subfile you are in instead.
 
                                                        *lvim-tex-target-toggle*
 The COMPILE TARGET is normally the root. `:LvimTex main` toggles it to the
-current file and back; the choice is remembered per project.
+current file and back; the choice is remembered per project. On a book this is
+the one real speed lever — the engine is handed one chapter instead of the whole
+document.
+
+A target that has no PDF yet is BUILT by the toggle (`root.build_on_toggle`):
+you toggled in order to see that file, and reporting a state instead would ask
+for a save of a file nobody changed, purely to make the tool act. A target that
+already has a PDF is SHOWN — a closed viewer is opened for it when
+`viewer.open_on_start` allows one to be opened unprompted, and an already-open
+one is re-pointed.
+
+Two things follow the target, and both used to be silent bugs: the artefact
+directory (see |lvim-tex-outdir|), and the ENGINE. A `% !TEX program` directive
+lives in the PREAMBLE, so a subfile has none of its own — it inherits the
+project's, or compiling one chapter of a book that asks for xelatex would fall
+back to the default engine and die on the first font package. An open viewer is
+re-pointed at the new PDF as well.
 
                                                                *lvim-tex-graph*
 The INCLUDE GRAPH is scanned from the root with the `latex` grammar and holds
@@ -110,8 +131,12 @@ RERUN LOOP      How many engine passes are needed, and when biber/bibtex has to
                                                           *lvim-tex-continuous*
 CONTINUOUS      `:LvimTex continuous` arms a SAVE-DRIVEN rebuild for the current
                 project (per project, so one document can watch while another
-                does not; `continuous.enabled` is the master switch and
-                `continuous.auto_start` arms it as a project opens).
+                does not). Three inputs decide it, in order:
+                `continuous.enabled` is the master switch; a project you have
+                TOGGLED keeps your choice; a project you never toggled takes
+                `continuous.auto_start`. So `auto_start = true` means "rebuild
+                on save from the start", and `,la` still turns it off for one
+                document.
 
                 A save rebuilds only when the written file is one the build
                 actually READS — that set comes from latexmk's own dependency
@@ -121,9 +146,48 @@ CONTINUOUS      `:LvimTex continuous` arms a SAVE-DRIVEN rebuild for the current
                 (`continuous.debounce`) into ONE build, and single-flight
                 collapses whatever still overlaps.
 
+                                                             *lvim-tex-builders*
+BUILDERS        `latexmk` (default) owns the rerun loop. `tectonic` is one
+                binary with no distribution. `latexrun` keeps intermediates in
+                its object directory and copies the PDF out — lvim-tex names
+                both explicitly so the log, the SyncTeX data and the PDF land
+                where everything else looks, and its ONE clean action means
+                `:LvimTex clean` removes the PDF as well. `arara` runs the
+                workflow the DOCUMENT declares in its own `% arara:` directives
+                and has no output directory at all, so `out_dir` is ignored for
+                it (health says so). `custom` is any command.
+
+                `texpresso` has a config entry and a health probe but is NOT a
+                batch build: it is an engine and a viewer in one long-lived
+                process that writes no PDF, produces no log and never exits.
+                Selecting it is refused with that explanation instead of timing
+                out two minutes later. Its live session is separate work and is
+                not implemented.
+
+                                                            *lvim-tex-selection*
+SELECTION       `<localleader>lL` in visual mode (or `:'<,'>LvimTex selection`)
+                compiles the selected text as a document of its own, reusing
+                the ROOT's preamble — everything from `\documentclass` to
+                `\begin{document}`, copied verbatim — in a scratch project under
+                `stdpath("cache")`, and opens the result in the viewer. The TeX
+                search paths point back at the project, so a preamble that
+                inputs a local macro file or names a `.bib` still resolves, and
+                an error is reported against YOUR line in YOUR file.
+
+                What does NOT carry over: anything defined after
+                `\begin{document}` (a `\newcommand` in the body, a counter, a
+                `\label` elsewhere), so references outside the selection render
+                as `??`. A package the preamble does not load is not guessed
+                for you. The selection must be balanced — half a `figure` is
+                not a document.
+
                                                               *lvim-tex-outdir*
-`out_dir` (default `"build"`) is resolved against the root's directory and
-passed to the builder; it is created if missing, because latexmk will not create
+`out_dir` (default `"build"`, `false` = beside the source) decides where the
+artefacts go, and the two cases follow DIFFERENT rules. A configured directory is
+ONE place for the whole project, so it hangs off the ROOT's directory and is
+passed to the builder with its out-dir flag. `false` means "where the engine
+runs", which is the TARGET's own directory — so a toggled subfile
+(|lvim-tex-target-toggle|) writes its `.pdf` and `.log` beside ITSELF. It it is created if missing, because latexmk will not create
 it itself. Note that a log records paths relative to the directory the ENGINE
 ran in — the target's own directory — never relative to the out dir.
 
@@ -131,6 +195,274 @@ ran in — the target's own directory — never relative to the out dir.
 A `% !TEX program = …` directive naming an engine (xelatex, lualatex, pdflatex,
 dvipdfmx) becomes the matching latexmk flag. A directive naming one of the
 `builders` keys selects that backend instead.
+
+==============================================================================
+5a. STRUCTURE & NAVIGATION                                 *lvim-tex-navigation*
+
+TABLE OF CONTENTS                                                *lvim-tex-toc*
+
+`:LvimTex toc [split|float|area|bottom]` (`<localleader>lt`) toggles the table
+of contents.
+
+The document is read as ONE whole: each file is parsed with the `latex` grammar,
+an `\input` splices the included file in at its own position, and the hierarchy
+is rebuilt from the sectioning levels — so a `\section` written in a chapter
+nests under the `\chapter` written in the root. Numbers are computed the way the
+standard classes count: `\part` is Roman and independent, the dotted chain starts
+below it, a starred section takes no number.
+
+Keys inside the panel (all `outline.keys`): >
+    <CR>    jump to the entry (closes the panel when `auto_close`)
+    o       jump, but keep the cursor in the panel
+    l / h   expand / collapse (or go to the parent)
+    - / +   fold one level shallower / deeper
+    1-7     fold to that sectioning depth
+    zR / zM unfold / fold everything
+    i r d n toggle include / label / todo rows and the section numbers
+    s       filter the tree
+    a       actions for the row under the cursor
+    R       re-read the document
+    g?      the key list
+    q       close
+<
+FILE JUMPS                                                        *lvim-tex-gf*
+
+`gf` (and `<C-w>f` / `<C-w>gf`) resolve the include under the cursor. The
+extension list is per command (`nav.extensions`); the search path is the current
+file's directory, the root's directory, then `\graphicspath`; `\usepackage` and
+`\documentclass` fall through to `kpsewhich`. Not on an include, the built-in
+`gf` runs unchanged. A TeX include that does not exist reports the candidates it
+tried and offers to create it (`nav.create_missing`).
+
+FINDERS                                                      *lvim-tex-finders*
+
+`:LvimTex files` `:LvimTex labels` `:LvimTex cites` — the project's files, every
+`\label` with its section, and the bibliography entries plus every cited key
+with no entry.
+
+==============================================================================
+5b. EDITING                                                   *lvim-tex-editing*
+
+TEXT OBJECTS                                              *lvim-tex-textobjects*
+
+Operator-pending and visual, from the treesitter queries this plugin ships: >
+    ae ie   environment  (\begin{x} … \end{x})
+    ac ic   command with its arguments / the argument list
+    a$ i$   math zone  ($…$, \[…\], math environments)
+    ad id   delimiter pair  (\left…\right, brace / bracket groups)
+    am im   one \item
+    aa ia   one argument group
+    a%      a comment
+<
+The cursor only has to be inside the OBJECT, not inside the part being
+selected — `ic` works with the cursor on `\frac`. Repeating an object in visual
+mode expands it to the next enclosing instance, and the objects dot-repeat as
+operator arguments (`dae` then `.`).
+
+MOTIONS                                                       *lvim-tex-motions*
+
+Normal, visual and operator-pending, count-aware (`3]m`): >
+    ]]  [[   next / previous section        ][  []   its end
+    ]m  [m   environment start              ]M  [M   environment end
+    ]n  [n   math zone start                ]N  [N   math zone end
+    ]i  [i   next / previous \item
+<
+MATCHING PAIRS                                                  *lvim-tex-match*
+
+`%` jumps between `\begin` and `\end`, `\left` and `\right`, and the two ends of
+a math zone or a brace / bracket group — resolved from the PARSE TREE, so an
+`\end{…}` inside a verbatim block or a comment is never mistaken for the closer.
+With the cursor on anything else the built-in `%` runs unchanged.
+`matchparen.enabled` (off by default) additionally highlights both delimiters;
+`:LvimTex matchparen` toggles that at runtime.
+
+OPERATORS                                                   *lvim-tex-operators*
+>
+    cse     change the surrounding environment (both ends, ONE undo step)
+    dse     delete the surrounding environment, keeping its body
+    tse     toggle the starred form (environment, command, or a sectioning
+            command on its heading row)
+    csc     rename the surrounding command, keeping its arguments
+    dsc     delete the surrounding command, keeping its first argument
+    tsd tsD cycle the delimiter modifiers forward / backward
+    tsf     toggle \frac{a}{b} ⇄ an inline division
+<
+FOLDING & INDENT                                             *lvim-tex-syntax*
+
+Both are DELEGATED. The folds come from the latex query bundle through
+|vim.treesitter.foldexpr()|, applied to TeX buffers alone by `fold.enabled`.
+The indent runs the `indents.scm` this plugin ships inside lvim-ts's query
+engine; `indent.keys` is the 'indentkeys' value that re-indents a `\end{…}` as
+it is typed. `indent.enabled = false` means lvim-tex leaves 'indentexpr' alone —
+lvim-ts applies the same query on its own when it is installed, and turning THAT
+off is lvim-ts's option, not this one.
+
+lvim-tex also registers the `tex`/`plaintex` → `latex` and `bib` → `bibtex`
+parser mapping, which Neovim does not ship: without it nothing that resolves a
+grammar from the FILETYPE — folding, treesitter highlighting, the query indent —
+works in a TeX buffer at all.
+
+==============================================================================
+5c. CONCEAL                                                   *lvim-tex-conceal*
+
+`\sum_{i=1}^{n} \alpha_i \le \left( \beta \right)` reads as `∑ᵢ₌₁ⁿ αᵢ ≤ (β)`
+while the file on disk stays exactly what you typed. `:LvimTex conceal`
+(`<localleader>ln`) turns it on for a buffer; `conceal.enabled = true` opens
+every TeX buffer concealed.
+
+What is drawn comes from the PARSE TREE, not from patterns: a `\alpha` inside a
+verbatim body, a `%` comment or an `lstlisting` is not a command to the grammar,
+so it is never touched. The cost of that choice, stated plainly: while an edit
+leaves a region unparseable, the concealment there is briefly stale.
+
+GROUPS (`conceal.groups`; `conceal.math_only` says WHERE each applies) >
+    math_symbols   \alpha → α, \sum → ∑, \le → ≤          maths only
+    scripts        x^{2n} → x²ⁿ, a_i → aᵢ                  maths only
+    delimiters     \left( → (, \left\langle → ⟨            maths only
+    accents        \'{e} → é, \"o → ö, \hat{a} → â         everywhere
+    styles         \textbf{x} → x (painted), \mathbb{R} → ℝ everywhere
+    refs           \ref{k} → 󰓹k, \cite{k} → 󰧮k             everywhere
+    sections       \section{T} → 󰉹T   (off by default)     everywhere
+<
+`:LvimTex conceal <group>` toggles one group everywhere, live.
+
+A script is concealed only when EVERY character of it has a Unicode script form
+— `x^{2n}` becomes `x²ⁿ`, `x^{2q}` is left alone, because Unicode has no
+superscript `q` and half-lowered text reads worse than the source. Accents
+follow the same rule: only combinations that exist precomposed (which is why
+there is no `\vec`).
+
+`conceal.level` and `conceal.cursor` are 'conceallevel' and 'concealcursor', set
+with `:setlocal` semantics while a TeX buffer is displayed — the value in every
+other buffer is untouched, and turning conceal off restores exactly what was
+there. The default `cursor = "nc"` keeps the cursor line concealed in normal and
+command mode and reveals it in insert and visual mode.
+
+YOUR OWN CHARACTERS                                      *lvim-tex-conceal-maps*
+
+`conceal.maps` is merged OVER the shipped tables, per group: an entry for a
+command replaces the shipped one, every command not named keeps its glyph. >lua
+    require("lvim-tex").setup({
+        conceal = {
+            enabled = true,
+            maps = {
+                math_symbols = { ["\\alpha"] = "A", ["\\myop"] = "⨁" },
+                refs = { ["\\label"] = "󰓹" },
+                styles = { ["\\textsc"] = "@markup.strong" },
+                accents = { ["\\'"] = { y = "ý" } },
+            },
+        },
+    })
+<
+A `styles` value is either a HIGHLIGHT GROUP (the wrapper is hidden and the
+argument painted with it — conceal can replace a range with a character but
+cannot make text bold) or a LETTER TABLE (`\mathbb` → `{ R = "ℝ", … }`).
+`accents` values are always letter tables.
+
+COST            Ephemeral extmarks in a decoration provider, over the VISIBLE
+                rows only, memoised against the buffer's changedtick — so
+                repainting an unchanged screen computes nothing. Measured on a
+                2000-line all-maths document (48-row window, ~24 marks per row,
+                min/median of 7 passes): +3.8 ms per full-page redraw, +1.2 ms
+                per one-line scroll, +0.78 ms per cursor move. With conceal off
+                the provider costs 0.012 ms per redraw — the same as not having
+                one.
+
+==============================================================================
+5d. COMPLETION & TOOLS                                     *lvim-tex-completion*
+
+Completion is TEXLAB's, wired by lvim-lang: cite keys from every bibliography
+the document loads (with the formatted reference on resolve), `\label`s with
+what they label, commands and environments with the package they come from,
+package and class names from the whole TeX tree, glossary and acronym keys, and
+file paths for every include command — all of it cross-file.
+
+lvim-tex adds ONLY what texlab does not answer, measured command by command
+against a multi-file, multi-bib fixture: the `\glsentry…` family (plus
+`\glsxtrshort`, `\glsxtrlong`, `\glsadd`), `\nameref` / `\cpageref` /
+`\autopageref` / `\vpageref` / `\subref`, and natbib's `\Citep` / `\Citet`.
+
+That gap-fill is ONE lvim-cmp source registered as a FALLBACK for the language
+server (`completion.fallback_for`), so it runs only where the server returned
+nothing at all: it cannot double up on texlab, and it stops firing on a command
+the day texlab learns it. `completion.commands` is the list;
+`completion.enabled = false` turns it off.
+
+                                                          *lvim-tex-cite-menu*
+CITATION ACTIONS
+`:LvimTex cite [key]` (`<localleader>lz`) acts on the key under the cursor: open
+its DOI or URL, open the PDF its `file` field names, jump to the entry in the
+`.bib`, or yank the key. Which FIELDS each action reads is `cite.fields`, and
+the URL templates are `cite.doi_url` / `cite.arxiv_url` — a DOI proxy or an
+institutional resolver is one line, not a patch.
+
+                                                              *lvim-tex-count*
+WORD COUNT
+`:LvimTex count` (`<localleader>lw`) runs `texcount -inc`, so it counts the
+DOCUMENT (texcount follows `\input` and `\include` itself), not the file.
+`:LvimTex count file` counts the current file alone and `:LvimTex count
+selection` the visual selection.
+
+                                                             *lvim-tex-texdoc*
+PACKAGE DOCUMENTATION
+`:LvimTex doc [package]` (`<localleader>ld`) opens a package's manual through
+`texdoc`. The resolving form (`texdoc -l`) always runs first, because the
+opening form detaches and its "no documentation" would otherwise be invisible.
+
+==============================================================================
+5e. MATHS ABBREVIATIONS & SNIPPETS                              *lvim-tex-imaps*
+
+With `imaps.enabled`, a leader (a BACKTICK, as in the tool this replaces, so the
+abbreviations transfer with the rest of the keys) plus a short mnemonic expands
+the moment it is typed: >
+    `a → \alpha      `ve → \varepsilon    `-> → \to
+    `o+ → \oplus     `R  → \mathbb{R}     `in → \in
+<
+and ONLY inside a maths zone. In prose, in a comment, in a verbatim body or
+inside the `\text{}` of a formula the two characters typed stay text. The zone
+comes from the PARSE TREE (the same answer conceal uses), so an unterminated
+`$x `a` still counts as maths. The backtick is safe despite `` `word' `` being
+LaTeX's opening quote: that form does not occur inside maths.
+
+93 abbreviations ship in 8 groups. `:LvimTex imaps` (`<localleader>lm`) lists
+them all — keystrokes, the LaTeX, the glyph, the group — and toggles the feature
+from the window's footer; `:LvimTex imaps on|off|toggle` does the same from the
+command line. `imaps.mappings` merges OVER the shipped table, `imaps.disable`
+drops entries.
+
+NO TRIGGER MAY BE A PREFIX OF ANOTHER. They auto-expand, so the shorter always
+fires first and the longer could never be reached; `:checkhealth lvim-tex` names
+any pair that breaks it. `j`, `J`, `K`, `M`, `O`, the digits 1-5/7/9 and `&`,
+`#`, `_`, `:`, `;`, `?` are unassigned on purpose.
+
+The MECHANISM is lvim-snippets' postfix engine: lvim-tex registers one rule per
+abbreviation there rather than running a second insert-mode watcher of its own.
+lvim-snippets must be installed with its `postfix.enabled` left on — health
+reports both halves separately.
+
+                                                          *lvim-tex-close-env*
+CLOSING AN ENVIRONMENT WHILE TYPING
+
+`]]` in insert mode writes the `\end` of the innermost environment that is still
+open, or the `\right` of an open `\left` delimiter — read from the parse tree,
+so a `\begin` inside a verbatim body is never a candidate and standing inside a
+COMPLETE environment does nothing instead of writing a second `\end`. A
+delimiter closes inline; an environment closes on its own line, indented like
+its `\begin`, with a blank body line left under a just-typed `\begin{…}`
+(`edit.close_env_body`). With nothing open the key types itself, exactly as `%`
+and `gf` fall back to the built-ins.
+
+                                                           *lvim-tex-snippets*
+SNIPPETS
+
+lvim-tex ships a `tex` collection (71 snippets: document skeletons, sectioning
+with labels, environments, maths constructs, references, formatting) and
+registers it with lvim-snippets as an extra collection ROOT — scanned AFTER your
+own `paths`, so it can never outrank or replace them. `snippets.enabled = false`
+opts out.
+
+Rule of thumb: anything with an argument or limits (`\frac`, `\sum_{}^{}`, an
+environment) is a snippet; a bare symbol is an abbreviation.
 
 ==============================================================================
 6. DIAGNOSTICS                                            *lvim-tex-diagnostics*
@@ -219,9 +551,31 @@ can only disagree with the viewer's.
 FORWARD         `:LvimTex view` (`<localleader>lv`) opens the viewer and puts
                 it at the paragraph under the cursor. `synctex` answers at
                 paragraph granularity: that is what the format records, not a
-                rounding error here. `synctex.forward_on_build` does the same
+                rounding error here — ONE source line has one anchor, so a long
+                paragraph that wraps over four typeset lines is marked at the
+                line TeX recorded, not at each of them.
+
+                A BLANK line (or one holding only a comment) is typeset as
+                nothing, so `synctex` has no record for it and would answer with
+                the nearest node it does know — measured on a real book, a blank
+                line between two paragraphs resolved to the chapter heading on
+                the PREVIOUS page. Such a line is resolved to the nearest line
+                that puts something on the page, downwards first.
+
+                The band covers the typeset BOX (`h`/`v`/`W`/`H`), not the point
+                `x`/`y`: `v` is on the BASELINE, so a band anchored at `y` and
+                grown downwards sits a whole line below the text and runs to the
+                page edge. `synctex.forward_on_build` does the same
                 after every successful build, so the viewer follows what you
                 are editing with no keystroke.
+
+                `synctex.follow_cursor` does it continuously: after the cursor
+                has been still for `follow_debounce` ms the page moves to the
+                paragraph it sits in. It never OPENS a viewer — it only moves
+                one that is already open — and it is silent when the PDF has no
+                SyncTeX data for that file, so a buffer that was not part of the
+                last build costs nothing. Debounced rather than per-move because
+                each follow is a `synctex` process.
 
                                                       *lvim-tex-inverse-search*
 INVERSE         A click in the viewer moving the cursor here. It needs the
@@ -246,14 +600,16 @@ INVERSE         A click in the viewer moving the cursor here. It needs the
                             health prints the exact Command and Arguments.
                   Sumatra   automatic when lvim-tex launched it
                             (`-inverse-search`).
-                  evince    not claimed: it needs a D-Bus signal monitor that
-                            has not been exercised anywhere yet.
+                  evince    not claimed: the reverse direction is a `SyncSource`
+                            SIGNAL, which means holding a monitor process for
+                            the viewer's lifetime. Forward search over D-Bus IS
+                            verified against the local binary.
 
 HONESTY         Health never reports an unproven module as ready. It separates
                 what was verified against a real binary on this machine
-                (preview, zathura, okular) from what follows the viewer's own
-                documentation on a platform this machine is not (sioyek, Skim,
-                SumatraPDF) from what is experimental (evince).
+                (preview, zathura, okular, evince) from what follows the
+                viewer's own documentation, on a machine or platform that could
+                not run it (sioyek, Skim, SumatraPDF).
 
 ==============================================================================
 7. ADDING A LOG RULE                                        *lvim-tex-log-rules*
@@ -307,6 +663,8 @@ bibliography is not reported as an empty bibtex entry.
 :LvimTex view           Open the PDF viewer on this project's output and
                         forward-search it to the cursor (|lvim-tex-synctex|).
 :LvimTex view close     Close it.
+:'<,'>LvimTex selection Compile the visual selection as a document of its own
+                        (see |lvim-tex-selection|).
 :LvimTex stop           Stop this project's build.
 :LvimTex stop_all       Stop every running build.
 :LvimTex clean          Remove the auxiliary files (`latexmk -c`).
@@ -316,6 +674,22 @@ bibliography is not reported as an empty bibtex entry.
 :LvimTex info           Report root, target, builder, out dir, include and
                         watch counts, build status, and which rule produced
                         each diagnostic entry.
+:LvimTex toc [layout]   Toggle the table of contents (|lvim-tex-toc|).
+:LvimTex files          Find a file in the project.
+:LvimTex labels         Find a `\label` in the project.
+:LvimTex cites          Find a citation in the project.
+:LvimTex imaps [on|off|toggle]
+                        List the maths abbreviations, or switch them
+                        (|lvim-tex-imaps|).
+:LvimTex cite [key]     Citation actions for a key (|lvim-tex-cite-menu|).
+:LvimTex count [file|selection]
+                        Word count through texcount (|lvim-tex-count|).
+:LvimTex doc [package]  Package documentation through texdoc
+                        (|lvim-tex-texdoc|).
+:LvimTex conceal [group]
+                        Toggle conceal for this buffer, or one GROUP everywhere
+                        (|lvim-tex-conceal|).
+:LvimTex matchparen     Toggle the matching-pair highlight (|lvim-tex-match|).
 :LvimTex reload         Drop the cached project data and re-read it. Running
                         builds are left alone.
 
@@ -330,7 +704,18 @@ prefix and `maplocalleader = ","`, `keys.build` reads `,ll`.
     <localleader>ll     build
     <localleader>la     toggle the save-driven rebuild loop
     <localleader>lo     open the build panel
+    <localleader>lm     list the maths abbreviations
+    <localleader>lz     citation actions for the key under the cursor
+    <localleader>lw     word count
+    <localleader>ld     documentation for the package under the cursor
+    <localleader>ln     toggle conceal
+    <localleader>lt     toggle the table of contents
+    <localleader>lf     find a file in the project
+    <localleader>lg     find a \label in the project
+    <localleader>lb     find a citation in the project
+    gf                  jump into the include under the cursor
     <localleader>lv     open the PDF viewer and jump it to the cursor
+    <localleader>lL     (visual) compile the selection as a document
     <localleader>lk     stop this build
     <localleader>lK     stop every build
     <localleader>lc     clean auxiliary files
@@ -370,16 +755,41 @@ for the complete default table; the entries that shape behaviour most:
 builder         Active backend, a key of `builders`. Default `"latexmk"`.
 builders        Per-backend `{ bin, args, out_dir_flag }`. `out_dir_flag` is a
                 format string (`"-outdir=%s"`).
-out_dir         Build directory, relative to the root's own directory. `nil`
-                keeps every artefact beside the source.
-root            `magic_comment`, `scan_lines`, `markers`, `subfiles`.
+out_dir         Build directory, relative to the root's own directory. `false`
+                keeps every artefact beside the source — `false` and not `nil`,
+                because a nil value in a Lua table is an ABSENT key, so
+                `setup({ out_dir = nil })` would merge nothing at all.
+root            `magic_comment`, `scan_lines`, `markers`, `subfiles`,
+                `build_on_toggle`.
 continuous      `enabled`, `auto_start`, `on_save`, `timeout`, `debounce`.
 diagnostics     `enabled`, `warnings`, `boxes`, `quickfix`, `ignore`, `rules`.
 panel           Build-panel layout: `"float"`, `"area"` or `"bottom"`.
 viewer          `enabled`, `name`, `priority`, `open_on_start`, plus a
                 `{ bin, args }` table per external viewer
                 (see |lvim-tex-viewing|).
-synctex         `bin`, `inverse`, `forward_on_build` (|lvim-tex-synctex|).
+synctex         `bin`, `inverse`, `forward_on_build`, `follow_cursor`,
+                `follow_debounce` (|lvim-tex-synctex|).
+selection       `dir`, `suffix`, `view`, `timeout` (|lvim-tex-selection|).
+outline         `layout`, `position`, `width`, `follow`, `auto_close`,
+                `fold_level`, `max_level`, `todo_keywords`, `show`, `keys`
+                (|lvim-tex-toc|).
+nav             `extensions`, `kpsewhich`, `create_missing` (|lvim-tex-gf|).
+textobjects     `enabled` (|lvim-tex-textobjects|).
+motion          `enabled` (|lvim-tex-motions|).
+fold            `enabled`, `level` (|lvim-tex-syntax|).
+indent          `enabled`, `keys` (|lvim-tex-syntax|).
+matchparen      `enabled`, `highlight`, `priority` (|lvim-tex-match|).
+conceal         `enabled`, `level`, `cursor`, `groups`, `math_only`, `maps`
+                (|lvim-tex-conceal|).
+imaps           `enabled`, `leader`, `mappings`, `disable` (|lvim-tex-imaps|).
+snippets        `enabled` (|lvim-tex-snippets|).
+cite            `doi_url`, `arxiv_url`, `fields`, `yank_register`
+                (|lvim-tex-cite-menu|).
+count           `bin`, `args`, `per_file`, `timeout` (|lvim-tex-count|).
+docs            `bin`, `args`, `list_args`, `timeout` (|lvim-tex-texdoc|).
+completion      `enabled`, `priority`, `fallback_for`, `trigger_chars`,
+                `commands`, `glossary_definitions`, `glossary_loaders`
+                (|lvim-tex-completion|).
 filetypes       Filetypes lvim-tex attaches to.
 notify          Emit |vim.notify| lines for lifecycle events.
 output_lines    Trailing raw-output lines kept per project.

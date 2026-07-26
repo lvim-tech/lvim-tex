@@ -22,6 +22,7 @@ local api = vim.api
 local config = require("lvim-tex.config")
 local state = require("lvim-tex.state")
 local root_mod = require("lvim-tex.root")
+local build_mod = require("lvim-tex.build")
 local viewer = require("lvim-tex.viewer")
 local ui = require("lvim-ui")
 
@@ -106,8 +107,8 @@ end
 local function summary_rows(root)
     local project = state.project(root)
     local b = project.build
-    local engine = root_mod.engine(project.target)
-    local watch = root_mod.watch(root, project.target, root_mod.out_dir(root))
+    local engine = root_mod.engine_for(root, project.target)
+    local watch = root_mod.watch(root, project.target, root_mod.out_dir(root, project.target))
     local duration = (b.started and b.finished) and math.floor((b.finished - b.started) / 1e6) or nil
     local pdf = root_mod.pdf(root, project.target)
 
@@ -117,9 +118,9 @@ local function summary_rows(root)
         fact(
             "f:builder",
             "builder",
-            (root_mod.program(project.target) or config.builder) .. (engine and (" (" .. engine .. ")") or "")
+            (root_mod.program_for(root, project.target) or config.builder) .. (engine and (" (" .. engine .. ")") or "")
         ),
-        fact("f:out", "out dir", vim.fn.fnamemodify(root_mod.out_dir(root), ":~")),
+        fact("f:out", "out dir", vim.fn.fnamemodify(root_mod.out_dir(root, project.target), ":~")),
         fact(
             "f:pdf",
             "pdf",
@@ -136,7 +137,11 @@ local function summary_rows(root)
         fact(
             "f:loop",
             "continuous",
-            (b.continuous and "armed" or "off") .. (config.continuous.enabled and "" or " (disabled in config)")
+            -- The EFFECTIVE state (which folds in `auto_start`), plus WHY when it was never toggled —
+            -- "off" on a project whose config arms it would be a lie.
+            (build_mod.is_continuous(root) and "armed" or "off")
+                .. (b.continuous == nil and " (from continuous.auto_start)" or "")
+                .. (config.continuous.enabled and "" or " (disabled in config)")
         ),
         fact("f:watch", "watching", ("%d file%s"):format(#watch, #watch == 1 and "" or "s")),
     }
