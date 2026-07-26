@@ -118,3 +118,13 @@
   "}"
   "]"
 ] @indent.end
+
+; A row whose only captured ancestor is `document` (which does not indent, so it is deliberately
+; uncaptured above) reaches the engine with nothing to compute from, and its contract for "unsure"
+; is to KEEP the line's indent — so `=` leaves a wrongly indented top-level `\begin{…}` wrong.
+; @indent.ignore stops the upward walk there instead, resolving the row to the levels below it.
+((generic_environment
+  (begin
+    name: (curly_group_text
+      (text) @_name))) @indent.ignore
+  (#eq? @_name "document"))
