@@ -42,6 +42,43 @@ local MAX_HOPS = 5
 -- Extensions tried, in order, when an include names no extension.
 local TEX_EXT = { "", ".tex", ".ltx" }
 
+-- Files the BUILD writes. A rebuild must not be triggered by its own output, and when the artefacts
+-- land BESIDE the source (`out_dir = false`) "is it in the out dir" cannot answer that — the out dir
+-- is then the project itself. So an artefact is recognised by BEING one.
+---@type table<string, boolean>
+local ARTEFACT_EXT = {}
+for _, ext in ipairs({
+    "aux",
+    "bbl",
+    "bcf",
+    "blg",
+    "brf",
+    "dvi",
+    "fdb_latexmk",
+    "fls",
+    "fmt",
+    "glg",
+    "glo",
+    "gls",
+    "idx",
+    "ilg",
+    "ind",
+    "lof",
+    "log",
+    "lot",
+    "nav",
+    "out",
+    "pdf",
+    "ps",
+    "run.xml",
+    "snm",
+    "toc",
+    "vrb",
+    "xdv",
+}) do
+    ARTEFACT_EXT[ext] = true
+end
+
 -- Include node types of the tree-sitter-latex grammar whose target is ITSELF a TeX file, so the
 -- graph scan RECURSES into it. Verified against the grammar's own highlight queries.
 ---@type table<string, boolean>
@@ -137,9 +174,15 @@ function M.magic(path)
     end
     for _, line in ipairs(head_lines(path, config.root.scan_lines)) do
         -- `%%` is an escaped percent in a Lua pattern; the directive itself is `% !TEX key = value`.
-        local key, value = line:match("^%s*%%+%s*!TEX%s+([%a_]+)%s*=?%s*(.-)%s*$")
+        -- The key may carry a hyphen because the engine directive has TWO spellings in the wild:
+        -- `program` and TeXShop's `TS-program`, which is what most existing documents actually carry
+        -- (`%!TEX TS-program = xelatex`). A key pattern of `[%a_]+` matched neither the hyphen nor the
+        -- prefix, so such a document silently compiled with the DEFAULT engine — and a preamble with
+        -- fontspec then dies on "requires either XeTeX or LuaTeX", pointing at a file in the TeX
+        -- distribution. The `TS-` prefix is stripped so both spellings mean the same thing here.
+        local key, value = line:match("^%s*%%+%s*!%s*TEX%s+([%a%-_]+)%s*=?%s*(.-)%s*$")
         if key then
-            key = key:lower()
+            key = key:lower():gsub("^ts%-", "")
             if (key == "root" or key == "program") and value ~= "" then
                 out[key] = value
             end
@@ -176,6 +219,40 @@ function M.engine(path)
         return nil
     end
     return program:lower()
+end
+
+--- The backend a `% !TEX program` directive selects for this project: the compiled file's own
+--- directive first (it is the more specific statement), then the ROOT's.
+---
+--- The root is consulted at all because the directive lives in the PREAMBLE, and a subfile has none —
+--- so compiling one chapter of a book whose root says `xelatex` used to fall back to the default
+--- engine and die on the first font package.
+---@param root string
+---@param target string?
+---@return string?
+function M.program_for(root, target)
+    if target and target ~= root then
+        local own = M.program(target)
+        if own then
+            return own
+        end
+    end
+    return M.program(root)
+end
+
+--- The ENGINE a `% !TEX program` directive names (xelatex, lualatex, …) for this project — same
+--- precedence as `program_for`, and for the same reason.
+---@param root string
+---@param target string?
+---@return string?
+function M.engine_for(root, target)
+    if target and target ~= root then
+        local own = M.engine(target)
+        if own then
+            return own
+        end
+    end
+    return M.engine(root)
 end
 
 --- The main file of a subfiles document: `\documentclass[main.tex]{subfiles}` names it in the
@@ -337,22 +414,46 @@ function M.toggle_target(buf)
     return project.target
 end
 
---- Where the build for `root` writes its artefacts: `config.out_dir` resolved against the root's own
---- directory (an absolute setting is used as-is, nil means "beside the source"). Every consumer —
+--- Where the build writes its artefacts.
+---
+--- With `config.out_dir` set, it is that path resolved against the ROOT's directory (an absolute
+--- setting is used as-is) — one build directory for the whole project. With `out_dir = false` the
+--- artefacts land beside the source, and "the source" is the file the ENGINE RUNS ON: every backend's
+--- `cwd` is the TARGET's directory, so a toggled subfile writes its `.pdf`/`.log` next to itself, not
+--- next to the root. Passing the target is therefore not optional bookkeeping — it is the difference
+--- between finding the log and not.
+---
+--- (`false` and not `nil`, because a nil value in a Lua table is an absent key and merges nothing.) Every consumer —
 --- the builder's out-dir flag, the log reader, the `.fls` watch set — must agree on this one answer,
 --- which is why it lives here rather than in the build module.
 ---@param root string
+---@param target string?  the file being compiled; defaults to `root`
 ---@return string
-function M.out_dir(root)
-    local dir = fs.dirname(root)
+function M.out_dir(root, target)
+    -- Where the ENGINE runs, which is every backend's `cwd`: the target's own directory. This is the
+    -- answer whenever the artefacts are not being redirected, and it is why the target matters — a
+    -- toggled subfile writes beside ITSELF, not beside the root.
+    local engine_dir = fs.dirname(target or root)
     local out = config.out_dir
     if not out or out == "" then
-        return dir
+        return engine_dir
+    end
+    -- A backend that CANNOT redirect its output (arara reads its whole workflow from the document and
+    -- has no output-directory option at all) also writes where it runs. The alternative is worse than a
+    -- wrong answer: the log parser, `M.pdf` and forward search would all look into an empty `build/`
+    -- while the files sit beside the source, and the build would look successful with no PDF.
+    local builder = M.program_for(root, target) or config.builder
+    local ok_mod, mod = pcall(require, "lvim-tex.build." .. builder)
+    if ok_mod and type(mod) == "table" and mod.supports and mod.supports.out_dir == false then
+        return engine_dir
     end
     if out:sub(1, 1) == "/" then
         return out
     end
-    return fs.normalize(dir .. "/" .. out)
+    -- A CONFIGURED out dir is one directory for the whole PROJECT, so it hangs off the ROOT — not off
+    -- whichever file happens to be the target, which would scatter a `build/` into every chapter
+    -- folder. The engine is told about it with `-outdir`, so its own cwd does not matter here.
+    return fs.normalize(fs.dirname(root) .. "/" .. out)
 end
 
 --- The PDF the build for `root` produces when compiling `target`.
@@ -366,7 +467,7 @@ end
 ---@return string
 function M.pdf(root, target)
     local jobname = fn.fnamemodify(target or root, ":t:r")
-    return fs.normalize(M.out_dir(root) .. "/" .. jobname .. ".pdf")
+    return fs.normalize(M.out_dir(root, target) .. "/" .. jobname .. ".pdf")
 end
 
 --- Every file `path` pulls in, one level deep, as `{ path = <abs>, recurse = <boolean> }` records.
@@ -486,6 +587,13 @@ function M.watch(root, target, log_dir)
     --- Should `path` be watched? A TeX distribution's own files change when the distribution is
     --- upgraded, not while editing, and a GENERATED artefact (`.aux`, `.bbl`, …) is written BY the
     --- build — watching either would only cost rebuilds.
+    ---
+    --- Two independent tests, and both are needed. An artefact is recognised by its EXTENSION, which
+    --- is the only test that works when the artefacts land beside the source: with `out_dir = false`
+    --- the artefact directory IS the project, so a directory test would exclude every source file in
+    --- it and leave the watch set empty. The directory test then still earns its place for a SEPARATE
+    --- out dir, where it also catches generated inputs with source-like extensions (a `.tex` written
+    --- by the build).
     ---@param path string?
     ---@return boolean
     local function wanted(path)
@@ -495,7 +603,15 @@ function M.watch(root, target, log_dir)
         if path:match("^/usr/") or path:match("/texmf") then
             return false
         end
-        return not vim.startswith(path, artefact_dir .. "/")
+        local name = fs.basename(path):lower()
+        -- `.run.xml` is two-part, so match the longest suffix first.
+        if ARTEFACT_EXT[name:match("%.([%w]+%.[%w]+)$") or ""] or ARTEFACT_EXT[name:match("%.([%w]+)$") or ""] then
+            return false
+        end
+        if artefact_dir ~= base_dir and vim.startswith(path, artefact_dir .. "/") then
+            return false
+        end
+        return true
     end
 
     --- Add `spec`, resolved against the run's directory.

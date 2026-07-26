@@ -15,7 +15,9 @@
 ---@field pending    boolean     A rebuild was requested while this one was in flight
 ---@field output     string[]    Raw stdout+stderr tail of the last build
 ---@field watchdog   uv.uv_timer_t?  Timer that kills a wedged build
----@field continuous boolean     The save-driven loop is armed for this root
+---@field continuous boolean?    The save-driven loop for this root: true/false once the user has
+---                             DECIDED, nil while they have not — which is what lets
+---                             `continuous.auto_start` be the answer for a project nobody toggled
 
 ---@class LvimTexProject
 ---@field root   string          Absolute path of the root .tex document
@@ -27,6 +29,8 @@
 ---@field diag_bufs table<integer, boolean>?  Buffers the LAST run published to, so they can be cleared
 ---@field debounce uv.uv_timer_t?  the continuous loop's pending-rebuild timer for this project
 ---@field viewer string?         Name of the viewer opened for this project (nil = none opened)
+---@field viewer_pdf string?     The PDF that viewer was opened ON — `:LvimTex main` changes which
+---                             file the build produces, and the viewer has to follow it
 
 local M = {}
 
@@ -52,7 +56,9 @@ function M.project(root)
         p = {
             root = root,
             target = root,
-            build = { status = "idle", pending = false, output = {}, continuous = false },
+            -- `continuous` is deliberately ABSENT, not false: nil means "undecided", so
+            -- `config.continuous.auto_start` supplies the answer until the user toggles it.
+            build = { status = "idle", pending = false, output = {} },
         }
         M.projects[root] = p
     end

@@ -88,8 +88,9 @@ end
 --- the URL and the generation) and opens a fresh tab, which is what a user asking for the viewer again
 --- after closing the tab means.
 ---@param ctx LvimTexViewCtx
+---@param opts { no_browser: boolean? }?  `no_browser` re-registers without opening a tab (retarget)
 ---@return boolean ok, string? err
-function M.open(ctx)
+function M.open(ctx, opts)
     local mod = preview()
     if not mod then
         return false, "lvim-preview is not installed"
@@ -117,8 +118,24 @@ function M.open(ctx)
     if not h then
         return false, err or "could not register the artifact"
     end
-    mod.open(id_of(ctx))
+    if not (opts and opts.no_browser) then
+        mod.open(id_of(ctx))
+    end
     return true, nil
+end
+
+--- Serve a DIFFERENT file on the same page. Re-registration is keyed on the artifact id, so the slug —
+--- and therefore the URL of every open tab — survives; only the path behind it changes. No browser is
+--- launched: the tab the user already has is the one that must follow, and `reload` makes it refetch.
+---@param ctx LvimTexViewCtx
+---@return nil
+function M.retarget(ctx)
+    local mod = preview()
+    if not mod then
+        return
+    end
+    M.open(ctx, { no_browser = true })
+    M.reload(ctx)
 end
 
 --- Is the page being served for this project?
@@ -158,14 +175,22 @@ end
 --- lvim-preview's (`page` 1-based, `x`/`y` in points from the page's top-left) and is exactly what
 --- `synctex view` reports, so the viewer layer hands its result over unchanged.
 ---@param ctx LvimTexViewCtx
----@param target { page: integer, x: number, y: number }
+---@param target { page: integer, x: number, y: number, width: number?, height: number? }
 ---@return boolean
 function M.forward(ctx, target)
     local h = handle(ctx)
     if not h then
         return false
     end
-    return h:synctex({ page = target.page, x = target.x, y = target.y }) == true
+    -- `width`/`height` are the typeset BOX (see lvim-tex.synctex): passing them makes the band cover
+    -- the line instead of the page-wide 14pt default the page falls back to.
+    return h:synctex({
+        page = target.page,
+        x = target.x,
+        y = target.y,
+        width = target.width,
+        height = target.height,
+    }) == true
 end
 
 --- Unregister the artifact. lvim-preview stops its server when nothing else is being served.

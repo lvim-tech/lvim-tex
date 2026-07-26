@@ -7,8 +7,84 @@
 
 local S = vim.diagnostic.severity
 
+local fn = vim.fn
+local fs = vim.fs
+
+--- Where the DOCUMENT asks for `package`, so a fatal error raised inside that package's own `.sty`
+--- can be reported where the user can act on it.
+---
+--- A package error is raised while the `.sty` is being read, so the log's file stack points at a file
+--- inside the TeX distribution — factually correct and completely useless: nobody fixes fontspec by
+--- editing fontspec.sty. The line that CAUSED it is the `\usepackage` in the preamble.
+---
+--- Only the compiled file is searched, not the whole include graph: a preamble lives in the root
+--- document (or in a file it inputs before `\begin{document}`, which is rare enough that the honest
+--- fallback — the document's first line — is better than guessing). Returns nil when the target
+--- cannot be read at all, and the caller then leaves the original attribution alone.
+---@param target string?
+---@param package string
+---@return { file: string, lnum: integer }?
+local function requested_at(target, package)
+    if not target or fn.filereadable(target) ~= 1 then
+        return nil
+    end
+    local ok, lines = pcall(fn.readfile, target)
+    if not ok or type(lines) ~= "table" then
+        return nil
+    end
+    local pattern = "\\%a*[Pp]ackage%s*%b[]?%s*{[^}]*" .. vim.pesc(package)
+    for i, line in ipairs(lines) do
+        -- `\usepackage{a,fontspec,b}` and `\RequirePackage[opt]{fontspec}` both count; a commented
+        -- line does not.
+        local code = line:match("^([^%%]*)") or ""
+        if code:find(pattern) or code:find("\\%a*[Pp]ackage%s*{[^}]*" .. vim.pesc(package)) then
+            return { file = target, lnum = i }
+        end
+    end
+    return { file = target, lnum = 1 }
+end
+
 ---@type LvimTexLogRule[]
 return {
+    {
+        -- `Fatal Package fontspec Error: The fontspec package requires either XeTeX or LuaTeX.`
+        -- Generic on purpose: every package raises its fatals through the same kernel machinery, so
+        -- one rule re-points all of them at the line that loaded the package.
+        id = "latex.fatal-package",
+        pkg = "latex",
+        match = "^Fatal Package%s+[%w@%-]+%s+Error",
+        severity = S.ERROR,
+        extract = function(rec)
+            local package = rec.text:match("^Fatal Package%s+([%w@%-]+)%s+Error")
+            local text = rec.text:match("Error:%s*(.+)$") or rec.text
+            -- The continuation lines are glued on with the `(pkg)` marker still in them; drop those
+            -- markers so the sentence reads as one.
+            text = text:gsub("%(" .. vim.pesc(package or "") .. "%)%s*", " "):gsub("%s+", " ")
+            local at = package and requested_at(rec.target, package) or nil
+            return {
+                file = at and at.file or nil,
+                lnum = at and at.lnum or nil,
+                message = ("%s: %s"):format(package or "package", vim.trim(text)),
+            }
+        end,
+    },
+    {
+        -- Printed AFTER the error that actually stopped the run, at the same useless position. The
+        -- parser drops it when a real error was reported and keeps it when nothing else was, so a
+        -- silent failure still says something.
+        id = "latex.emergency-stop",
+        pkg = "latex",
+        match = "^Emergency stop",
+        severity = S.ERROR,
+        extract = function(rec)
+            local at = requested_at(rec.target, "")
+            return {
+                file = at and at.file or nil,
+                lnum = at and 1 or nil,
+                message = "the run stopped here — see the error above it",
+            }
+        end,
+    },
     {
         id = "latex.undefined-ref",
         pkg = "latex",

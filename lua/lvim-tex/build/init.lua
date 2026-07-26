@@ -233,7 +233,9 @@ local function start(root, opts)
         return false
     end
 
-    local name = root_mod.program(target) or config.builder
+    -- The `% !TEX program` directive lives in the PREAMBLE, so a subfile has none — ask the project
+    -- (root first-class, target override) or a toggled chapter compiles with the wrong engine.
+    local name = root_mod.program_for(root, target) or config.builder
     local mod, err = backend(name)
     if not mod then
         notify(err or "no builder", vim.log.levels.ERROR)
@@ -245,8 +247,17 @@ local function start(root, opts)
         return false
     end
 
-    local out_dir = root_mod.out_dir(root)
-    if out_dir ~= vim.fs.dirname(root) and not uv.fs_stat(out_dir) then
+    -- A SESSION backend (texpresso) is an engine and a viewer in one long-lived process: it writes no
+    -- log, produces no PDF and never exits, so nothing below — the watchdog, the log parse, the viewer
+    -- artifact — can own it. Refuse it here rather than spawn a window the watchdog kills two minutes
+    -- later and report it as a failed build.
+    if mod.supports and mod.supports.oneshot == false then
+        notify(("builder %q is a live session, not a batch build"):format(name), vim.log.levels.WARN)
+        return false
+    end
+
+    local out_dir = root_mod.out_dir(root, target)
+    if out_dir ~= vim.fs.dirname(target) and not uv.fs_stat(out_dir) then
         -- latexmk refuses to create its own out-dir, so a first build into a fresh `build/` would
         -- fail with an error that says nothing about the real cause.
         fn.mkdir(out_dir, "p")
@@ -254,8 +265,8 @@ local function start(root, opts)
 
     local argv = mod.argv({
         target = target,
-        out_dir = (out_dir ~= vim.fs.dirname(root)) and out_dir or nil,
-        engine = root_mod.engine(target),
+        out_dir = (out_dir ~= vim.fs.dirname(target)) and out_dir or nil,
+        engine = root_mod.engine_for(root, target),
     })
 
     project.build.status = "building"
@@ -308,12 +319,24 @@ local function release_debounce(root)
     p.debounce = nil
 end
 
---- Is the continuous loop ARMED for this project? The master switch is config; the per-project arming
---- is the `:LvimTex continuous` toggle, so one project can watch while another does not.
+--- Is the continuous loop ARMED for this project?
+---
+--- Three inputs, in order: `continuous.enabled` is the master switch; a project the user has TOGGLED
+--- keeps whatever they chose; a project nobody has toggled takes `continuous.auto_start`. That last
+--- step is why the per-project flag starts as nil rather than false — with a plain boolean there is no
+--- way to tell "the user turned it off" from "the user never said", and `auto_start` could then only
+--- be applied by an autocmd racing whatever else touches the project first.
 ---@param root string
 ---@return boolean
 function M.is_continuous(root)
-    return config.continuous.enabled == true and state.project(root).build.continuous == true
+    if config.continuous.enabled ~= true then
+        return false
+    end
+    local decided = state.project(root).build.continuous
+    if decided == nil then
+        return config.continuous.auto_start == true
+    end
+    return decided == true
 end
 
 --- Toggle the loop for the project `buf` belongs to. Returns the new state (nil = no project).
@@ -330,7 +353,9 @@ function M.toggle_continuous(buf)
         return false
     end
     local project = state.project(root)
-    project.build.continuous = not project.build.continuous
+    -- Toggle the EFFECTIVE state, not the stored one: for an untouched project the effective state is
+    -- `auto_start`, so the first press must turn that off rather than agree with it.
+    project.build.continuous = not M.is_continuous(root)
     if not project.build.continuous then
         release_debounce(root) -- a queued rebuild must not fire after the loop was turned off
     end
@@ -363,7 +388,7 @@ function M.on_write(path, buf)
     end
     local project = state.project(root)
     local watched = false
-    for _, f in ipairs(root_mod.watch(root, project.target, root_mod.out_dir(root))) do
+    for _, f in ipairs(root_mod.watch(root, project.target, root_mod.out_dir(root, project.target))) do
         if f == path then
             watched = true
             break
@@ -434,7 +459,7 @@ function M._finish(root, builder, result)
 
     -- The log is named after the TARGET (a toggled subfile has its own), and lives in the build
     -- directory while its relative paths stay relative to the target's own directory.
-    local items = log.parse(project.target, root_mod.out_dir(root))
+    local items = log.parse(project.target, root_mod.out_dir(root, project.target))
     publish(root, items)
     quickfix(root, items)
 
@@ -458,7 +483,9 @@ function M._finish(root, builder, result)
     -- the diagnostics live in the editor and the page is not a second place to read them.
     viewer.on_build_done(root, result.code == 0, first_error(items) or ("build failed (exit %d)"):format(result.code))
 
-    local label = fn.fnamemodify(root, ":t")
+    -- Name what was COMPILED, not the project: with the target toggled to a subfile, "main.tex failed"
+    -- points at a file that was never handed to the engine.
+    local label = fn.fnamemodify(project.target, ":t")
     if result.code == 0 then
         notify(("%s %s built in %dms"):format(config.icons.ok, label, duration_ms(build)))
     else

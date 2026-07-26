@@ -50,6 +50,8 @@ local M = {}
 ---@field reload    fun(ctx: LvimTexViewCtx)?         only when supports.reload == "push"
 ---@field status    fun(ctx: LvimTexViewCtx, st: "building"|"ok"|"error", message: string?)?
 ---@field forward   fun(ctx: LvimTexViewCtx, target: table): boolean?
+---@field retarget  fun(ctx: LvimTexViewCtx, old_pdf: string)?  show a DIFFERENT file without losing
+---                 the window/tab; the layer falls back to close-then-open when a module has none
 ---@field verified  ("live"|"docs"|"platform"|"experimental")?  how far it has been PROVEN (health)
 ---@field inverse_setup fun(): { command: string, arguments: string }  only for a viewer whose inverse
 ---                     search is a MANUAL step inside its own preferences (Skim); health prints it
@@ -170,6 +172,19 @@ local function call(mod, method, ...)
     return fn(...)
 end
 
+--- Record WHAT was opened and ON WHICH file. Three call sites open a viewer (the command, and the two
+--- build-lifecycle hooks) and `retarget` needs the file from all of them — a viewer opened by a build
+--- and then retargeted was the bug this exists to prevent.
+---@param root string
+---@param mod LvimTexViewer
+---@param ctx LvimTexViewCtx
+---@return nil
+local function remember(root, mod, ctx)
+    local project = state.project(root)
+    project.viewer = mod.name
+    project.viewer_pdf = ctx.pdf
+end
+
 --- Open (or focus) the viewer on this project's PDF.
 ---@param root string
 ---@return boolean ok, string? err
@@ -181,9 +196,60 @@ function M.open(root)
     local ctx = context(root)
     local ok, why = mod.open(ctx)
     if ok then
-        state.project(root).viewer = mod.name
+        remember(root, mod, ctx)
     end
     return ok, why
+end
+
+--- Show this project's PDF if it is not already on screen — the "there is something to look at now"
+--- entry point, as opposed to `M.open`, which is an explicit request and always acts.
+---
+--- Three conditions, all of them the user's own settings rather than a guess: the viewer layer is on,
+--- `viewer.open_on_start` says a viewer may be opened without being asked for, and the file EXISTS
+--- (opening a viewer on a PDF that is not there is how you get an error dialog instead of a document).
+--- Already-open stays open, so this can be called freely.
+---@param root string
+---@return boolean opened
+function M.show(root)
+    if not config.viewer.enabled or config.viewer.open_on_start ~= true then
+        return false
+    end
+    if M.is_alive(root) then
+        return false
+    end
+    local project = state.project(root)
+    if vim.fn.filereadable(root_mod.pdf(root, project.target)) ~= 1 then
+        return false
+    end
+    return M.open(root) == true
+end
+
+--- The compile target changed (`:LvimTex main`), so the build now writes a DIFFERENT PDF — point the
+--- open viewer at it.
+---
+--- Without this, toggling to a subfile builds `ch1.pdf` while the page keeps serving `main.pdf`: the
+--- viewer looks alive and shows something plausible, which is worse than showing nothing. Our own page
+--- can be re-pointed in place (its URL is keyed on the project id, not the path, so the open tab stays
+--- valid); a viewer with no `retarget` is closed on the old file and opened on the new one.
+---@param root string
+---@return nil
+function M.retarget(root)
+    local project = state.project(root)
+    local mod = project.viewer and M.module(project.viewer) or nil
+    if not mod or not project.viewer_pdf then
+        return
+    end
+    local ctx = context(root)
+    if project.viewer_pdf == ctx.pdf then
+        return
+    end
+    if type(mod.retarget) == "function" then
+        mod.retarget(ctx, project.viewer_pdf)
+    else
+        mod.close({ root = root, target = project.target, pdf = project.viewer_pdf })
+        mod.open(ctx)
+    end
+    project.viewer_pdf = ctx.pdf
 end
 
 --- Close this project's viewer (no-op when it was never opened).
@@ -196,6 +262,7 @@ function M.close(root)
         mod.close(context(root))
     end
     state.project(root).viewer = nil
+    state.project(root).viewer_pdf = nil
 end
 
 --- Is a viewer currently showing this project?
@@ -231,7 +298,7 @@ function M.on_build_start(root)
         if not mod.open(ctx) then
             return
         end
-        state.project(root).viewer = mod.name
+        remember(root, mod, ctx)
     end
     call(mod, "status", ctx, "building")
 end
@@ -263,7 +330,7 @@ function M.on_build_done(root, ok, message)
         if vim.fn.filereadable(ctx.pdf) ~= 1 or not mod.open(ctx) then
             return
         end
-        state.project(root).viewer = mod.name
+        remember(root, mod, ctx)
         return
     end
     if ok then

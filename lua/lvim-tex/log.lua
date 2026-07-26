@@ -37,11 +37,13 @@ local S = vim.diagnostic.severity
 
 --- One parsed log record, before the rule pass.
 ---@class LvimTexRecord
----@field text  string    the un-wrapped message text
----@field file  string?   the file the log was inside when the record appeared
----@field lnum  integer?  1-based line, when the record carried one
----@field kind  "error"|"warning"|"box"|"info"
----@field raw   string    the first physical line, for debugging
+---@field text   string    the un-wrapped message text
+---@field file   string?   the file the log was inside when the record appeared
+---@field lnum   integer?  1-based line, when the record carried one
+---@field kind   "error"|"warning"|"box"|"info"
+---@field raw    string    the first physical line, for debugging
+---@field target string?   the file that was COMPILED — a rule needs it to re-attribute an entry the
+---                        log raised inside a package to the line that asked for the package
 
 --- One publishable item.
 ---@class LvimTexItem
@@ -133,6 +135,24 @@ local function records(lines, dir)
     end
 
     for _, line in ipairs(lines) do
+        -- TeX's own message machinery indents the CONTINUATION of a multi-line message with the
+        -- package's name in parentheses:
+        --
+        --     /…/fontspec.sty:101: Fatal Package fontspec Error: The fontspec package requires
+        --     (fontspec)                      either XeTeX or LuaTeX.
+        --
+        -- Those are not records of their own — treated as such, every long package message is
+        -- reported truncated at its first line, and each continuation becomes a diagnostic saying
+        -- nothing. `(/path/file.tex` (a file the engine opened) cannot be confused with this: the
+        -- marker's `)` closes immediately after a bare name.
+        local marker, rest = line:match("^%(([%w@%-]+)%)%s*(.*)$")
+        if marker and not pending and #out > 0 then
+            if rest ~= "" then
+                out[#out].text = out[#out].text .. " " .. rest
+            end
+            goto continue
+        end
+
         -- Continuation: the previous physical line filled the wrap width exactly, so this one is the
         -- rest of the same message. Records are flushed when a line is SHORT (or a new shape starts).
         if pending then
@@ -170,6 +190,7 @@ local function records(lines, dir)
             end
             i = i + 1
         end
+        ::continue::
     end
     if pending then
         out[#out + 1] = pending
@@ -262,6 +283,39 @@ local function ignored(message)
     return false
 end
 
+-- Entries that are a CONSEQUENCE of an earlier failure rather than a failure of their own: TeX prints
+-- them after the error that actually stopped the run. They are worth keeping only when nothing else
+-- was reported — a lone "Emergency stop." is still better than silence, three of them stacked on top
+-- of the real error are noise.
+---@type table<string, boolean>
+local CONSEQUENCE = {
+    ["latex.emergency-stop"] = true,
+    ["engine.no-output"] = true,
+}
+
+--- Drop the consequence entries when a real error is present, and collapse entries that are byte-for
+--- byte the same position and message (a package that raises its error once per pass).
+---@param items LvimTexItem[]
+---@return LvimTexItem[]
+local function prune(items)
+    local real_error = false
+    for _, item in ipairs(items) do
+        if item.severity == S.ERROR and not CONSEQUENCE[item.rule] then
+            real_error = true
+            break
+        end
+    end
+    local out, seen = {}, {}
+    for _, item in ipairs(items) do
+        local key = ("%s:%d:%d:%d:%s"):format(item.file, item.lnum, item.col, item.severity, item.message)
+        if not (real_error and CONSEQUENCE[item.rule]) and not seen[key] then
+            seen[key] = true
+            out[#out + 1] = item
+        end
+    end
+    return out
+end
+
 --- PASS 3 — the rule table. Returns the refined item, or nil when a rule DROPS the record.
 ---@param rec LvimTexRecord
 ---@param root string  fallback file for a record the log could not attribute
@@ -328,6 +382,7 @@ function M.parse_lines(lines, target, base_dir)
     for _, rec in ipairs(records(lines, dir)) do
         local classified = classify(rec, dir)
         if classified then
+            classified.target = target
             local keep = classified.kind ~= "box" or config.diagnostics.boxes
             if keep and classified.kind == "warning" and not config.diagnostics.warnings then
                 keep = false
@@ -340,7 +395,7 @@ function M.parse_lines(lines, target, base_dir)
             end
         end
     end
-    return items
+    return prune(items)
 end
 
 --- Parse the log FILE of the last build of `target`.

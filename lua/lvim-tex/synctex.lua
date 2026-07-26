@@ -87,6 +87,59 @@ local function run(args, cwd, done)
     end)
 end
 
+--- The lines of `file` — from the LOADED buffer when there is one, so an unsaved edit counts.
+---@param file string
+---@return string[]
+local function lines_of(file)
+    local buf = fn.bufnr(file)
+    if buf ~= -1 and api.nvim_buf_is_loaded(buf) then
+        return api.nvim_buf_get_lines(buf, 0, -1, false)
+    end
+    local ok, lines = pcall(fn.readfile, file)
+    return (ok and type(lines) == "table") and lines or {}
+end
+
+--- The nearest line that puts something ON THE PAGE, starting from `lnum`.
+---
+--- A blank line, or a line holding nothing but a comment, is typeset as NOTHING, so `synctex` has no
+--- record for it and answers with the nearest node it does know — which can be an unrelated place
+--- pages away (measured: a blank line between two paragraphs of a real book resolved to the chapter
+--- heading on the PREVIOUS page). Asking about such a line at all is the mistake; the honest target is
+--- the text around it.
+---
+--- Downwards first, because a blank line is most often the one you are about to write in; upwards only
+--- when there is nothing below.
+---@param file string
+---@param lnum integer
+---@return integer
+local function typeset_line(file, lnum)
+    local lines = lines_of(file)
+    if #lines == 0 then
+        return lnum
+    end
+    --- Does this line put nothing on the page?
+    ---@param i integer
+    ---@return boolean
+    local function empty(i)
+        local line = lines[i]
+        return line == nil or line:match("^%s*$") ~= nil or line:match("^%s*%%") ~= nil
+    end
+    if not empty(lnum) then
+        return lnum
+    end
+    for i = lnum + 1, #lines do
+        if not empty(i) then
+            return i
+        end
+    end
+    for i = lnum - 1, 1, -1 do
+        if not empty(i) then
+            return i
+        end
+    end
+    return lnum
+end
+
 --- FORWARD: where in the PDF does `file:line:col` end up?
 ---
 --- `synctex` answers for the position it can place, which is usually the start of the paragraph the
@@ -95,7 +148,7 @@ end
 ---@param file string   absolute path of the source file
 ---@param lnum integer   1-based
 ---@param col integer    1-based
----@param done fun(target: { page: integer, x: number, y: number }?, err: string?): nil
+---@param done fun(target: { page: integer, x: number, y: number, width: number?, height: number?, point: { x: number, y: number } }?, err: string?): nil
 ---@return nil
 function M.view(root, file, lnum, col, done)
     local ok, why = M.available()
@@ -106,14 +159,39 @@ function M.view(root, file, lnum, col, done)
     if fn.filereadable(pdf) ~= 1 then
         return done(nil, "no PDF yet — build first")
     end
-    run({ "view", "-i", ("%d:%d:%s"):format(lnum, math.max(1, col), file), "-o", pdf }, fs.dirname(root), function(f)
+    -- Never ask about a line that is typeset as nothing (see `typeset_line`).
+    local ask = typeset_line(file, lnum)
+    run({ "view", "-i", ("%d:%d:%s"):format(ask, math.max(1, col), file), "-o", pdf }, fs.dirname(root), function(f)
         local page = tonumber(f.Page)
         if not page then
             -- The commonest cause by far: this file was never part of the build that produced the
             -- current PDF, so the engine recorded no tag for it.
             return done(nil, ("%s is not in the PDF's SyncTeX data — rebuild"):format(fs.basename(file)))
         end
-        done({ page = page, x = tonumber(f.x) or 0, y = tonumber(f.y) or 0 }, nil)
+        -- `synctex view` reports BOTH a point and the box that contains it, and the difference is
+        -- visible: `x`/`y` is a point near the baseline, while `h`/`v` is the box ORIGIN with `v` ON
+        -- the baseline — so the typeset line occupies `[v - H, v]`, and a band drawn downwards from
+        -- `y` lands a whole line BELOW the text it is meant to mark. Hand over the box when the reply
+        -- carries one (it always does for typeset material) and fall back to the point otherwise.
+        --
+        -- The conversion belongs here, not in a viewer: "v is a baseline" is a fact about the SyncTeX
+        -- format, while a viewer only knows the ecosystem's contract — page, and points from the
+        -- page's top-left.
+        local h, v = tonumber(f.h), tonumber(f.v)
+        local w, height = tonumber(f.W), tonumber(f.H)
+        local px, py = tonumber(f.x) or 0, tonumber(f.y) or 0
+        -- `point` is kept alongside the box because the two answer different questions: a viewer draws
+        -- the BOX, while anything that maps back into the source (an inverse round trip) needs the
+        -- POINT — the box's top-left corner sits in the margin above the line and resolves to the
+        -- wrong place.
+        local target = { page = page, x = px, y = py, point = { x = px, y = py } }
+        if h and v and w and height and height > 0 and w > 0 then
+            target.x = h
+            target.y = math.max(0, v - height)
+            target.width = w
+            target.height = height
+        end
+        done(target, nil)
     end)
 end
 

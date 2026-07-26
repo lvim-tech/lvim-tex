@@ -4,12 +4,15 @@
 -- session interface. The daemon maps a PDF path to a window bus name (`FindDocument`), and that
 -- window then takes a `SyncView` call carrying the source file and line.
 --
--- EXPERIMENTAL, and labelled so in health. evince is not installed on this machine, so the interface
--- names below come from its published D-Bus API and have NOT been exercised against a running daemon.
--- What IS certain is `open` (evince <pdf>) and its automatic reload; forward search is the part that
--- graduates from "experimental" only after a live round trip somewhere evince exists. Inverse search
--- needs the reverse direction (a `SyncSource` signal, which requires holding a monitor process) and is
--- deliberately NOT claimed until that same round trip can be run.
+-- VERIFIED LIVE (2026-07-26, evince 48.4): the daemon activated, `FindDocument` returned the window's
+-- bus name, `/org/gnome/evince/Window/0` introspected with both `SyncView` and `SyncSource` on it, and
+-- the `SyncView` call this module makes — `(source_file, (line, column), timestamp)` — returned
+-- success. So forward search is not guesswork any more.
+--
+-- INVERSE is still NOT claimed, and that is a capability statement rather than a missing feature: the
+-- reverse direction is a `SyncSource` SIGNAL, so receiving it means holding a `gdbus monitor` child
+-- for the lifetime of the viewer and routing its output back here. That is a process this plugin does
+-- not own yet; claiming `inverse = true` without it would make health lie.
 --
 ---@module "lvim-tex.viewer.evince"
 
@@ -25,7 +28,7 @@ M.name = "evince"
 M.supports = { inverse = false, reload = "auto", status = false }
 
 ---@type "live"|"docs"|"platform"|"experimental"
-M.verified = "experimental"
+M.verified = "live"
 
 --- Is evince installed, and is the D-Bus tooling forward search needs present?
 ---@return boolean ok, string? detail
@@ -60,6 +63,9 @@ end
 --- Forward search over D-Bus: ask the daemon which window owns this document, then tell that window
 --- to sync to the source position. Two calls, because the window's bus name is not knowable in
 --- advance. Asynchronous throughout — a D-Bus round trip must never block the editor.
+---
+--- The timestamp argument is passed as 0: evince uses it only for focus-stealing prevention, and 0
+--- means "no user interaction triggered this", which is exactly true of a build-driven sync.
 ---@param ctx LvimTexViewCtx
 ---@param target { line: integer, col: integer, file: string }
 ---@return boolean
