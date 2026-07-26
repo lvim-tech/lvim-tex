@@ -52,11 +52,32 @@ local S = vim.diagnostic.severity
 ---@field message  string
 ---@field rule     string    id of the rule that produced it ("generic" when none matched)
 
--- TeX wraps its log at 79 columns unless `max_print_line` says otherwise. A physical line of exactly
--- the wrap width is therefore assumed to CONTINUE on the next one. We also raise the wrap width in
--- the build environment, which makes this heuristic rarely necessary — but logs produced by another
--- tool (or by a rerun outside the editor) still need it.
+-- TeX wraps its log at `max_print_line` columns, so a physical line of exactly that width CONTINUES
+-- on the next one. The width is not recorded anywhere in the log, and assuming the 79-column default
+-- unconditionally CORRUPTS every log written with a wider one — our own builds set `max_print_line`
+-- to 10000, where a 120-character message would swallow the line after it.
+--
+-- What the format does guarantee is the other direction: TeX never writes a line LONGER than
+-- `max_print_line`. So a log containing no line over 79 was written with the default and its
+-- 79-character lines are continuations; a log containing a longer line was not, and where it would
+-- have wrapped — if at all — is unknowable, so nothing is joined.
+--
+-- Inferring the width from "the length many lines share" was tried and is wrong: with our build
+-- environment the shared maximum is `half_error_line` (238), which is the ERROR CONTEXT display, not
+-- a wrapped message.
 local WRAP = 79
+
+--- The width at which THIS log wraps, or math.huge when it does not wrap at all.
+---@param lines string[]
+---@return number
+local function wrap_width(lines)
+    for _, line in ipairs(lines) do
+        if #line > WRAP then
+            return math.huge
+        end
+    end
+    return WRAP
+end
 
 --- Does this token look like a path TeX just opened, rather than any other parenthesis?
 --- `(./main.tex`, `(/usr/share/texmf/tex/latex/base/article.cls`, `("with spaces.tex"`.
@@ -79,8 +100,26 @@ end
 ---@return { text: string, file: string?, raw: string }[]
 local function records(lines, dir)
     local out = {}
-    local stack = {} ---@type string[]  open files, innermost last
+    -- Every OPEN parenthesis, innermost last — `false` for one that opened no file. A file stack that
+    -- only remembers the file-opening parens has no way to tell which `)` closes what, so a message's
+    -- own `(natbib)` or `(minted executable is …)` pops a REAL file off it and every diagnostic after
+    -- that is attributed to the wrong document.
+    ---@type (string|false)[]
+    local stack = {}
     local pending = nil ---@type { text: string, file: string?, raw: string }?
+    local wrap = wrap_width(lines)
+
+    --- The file the log is currently inside: the innermost paren that opened one.
+    ---@return string?
+    local function current()
+        for i = #stack, 1, -1 do
+            local entry = stack[i]
+            if entry then
+                return entry
+            end
+        end
+        return nil
+    end
 
     --- Absolute form of a path token from the log.
     ---@param token string
@@ -98,13 +137,13 @@ local function records(lines, dir)
         -- rest of the same message. Records are flushed when a line is SHORT (or a new shape starts).
         if pending then
             pending.text = pending.text .. line
-            if #line < WRAP then
+            if #line < wrap then
                 out[#out + 1] = pending
                 pending = nil
             end
         else
-            local rec = { text = line, file = stack[#stack], raw = line }
-            if #line >= WRAP then
+            local rec = { text = line, file = current(), raw = line }
+            if #line >= wrap then
                 pending = rec
             else
                 out[#out + 1] = rec
@@ -121,6 +160,8 @@ local function records(lines, dir)
                 if path_like(token) then
                     stack[#stack + 1] = absolute(token)
                     i = i + #token
+                else
+                    stack[#stack + 1] = false
                 end
             elseif ch == ")" then
                 if #stack > 0 then

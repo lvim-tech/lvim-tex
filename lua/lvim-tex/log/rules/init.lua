@@ -22,6 +22,11 @@
 ---@field severity? integer   A vim.diagnostic.severity value that replaces the shape's default
 ---@field extract?  fun(rec: LvimTexRecord): table|false|nil  Refine file/lnum/col/message; `false` DROPS the record
 
+local graphics = require("lvim-tex.log.rules.graphics")
+local tables = require("lvim-tex.log.rules.tables")
+local listings = require("lvim-tex.log.rules.listings")
+local refs = require("lvim-tex.log.rules.refs")
+local engine = require("lvim-tex.log.rules.engine")
 local latex = require("lvim-tex.log.rules.latex")
 local hyperref = require("lvim-tex.log.rules.hyperref")
 local biblatex = require("lvim-tex.log.rules.biblatex")
@@ -34,8 +39,15 @@ local M = {}
 -- Order matters: the specific packages come BEFORE the core LaTeX rules, because a package warning
 -- often also matches a generic core pattern (a hyperref bookmark complaint contains the word
 -- "Warning" like everything else), and the more specific verdict is the useful one.
+--
+-- Two positions inside the list are load-bearing in the same way, and were established by running the
+-- log corpus rather than by reasoning about it:
+--   • `graphics` before `latex` — a driver's "File `x.png' not found: using draft setting" is a
+--     graphics failure, not the kernel's generic missing-file error.
+--   • `refs` before `biblatex` — natbib's "Empty `thebibliography' environment" otherwise matches
+--     bibtex's empty-entry rule and is reported as "empty thebibliography field in ?".
 ---@type LvimTexLogRule[][]
-local GROUPS = { hyperref, biblatex, babel, fonts, layout, latex }
+local GROUPS = { graphics, tables, listings, refs, engine, hyperref, biblatex, babel, fonts, layout, latex }
 
 ---@type LvimTexLogRule[]?
 local flat = nil
