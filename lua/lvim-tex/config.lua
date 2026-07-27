@@ -524,8 +524,17 @@ return {
         continuous = "a", -- toggle the save-driven rebuild loop
         stop = "k",
         stop_all = "K",
-        clean = "c",
-        clean_full = "C",
+        clean = "c", -- the compile TARGET's auxiliary files
+        clean_full = "C", -- …and its PDF
+        -- HERE: the file in the buffer, whatever the target is — a chapter built with `,ls` can be
+        -- cleaned without disturbing the target the rest of the session depends on.
+        clean_here = "h",
+        clean_here_full = "H",
+        -- PURGE: every .tex the project's include graph names. A book built chapter by chapter
+        -- accumulates a set of artefacts per chapter, and reaching them one at a time is not a
+        -- workflow. Never a directory glob: a chapter no longer included is left alone.
+        clean_all = "p",
+        clean_all_full = "P",
         output = "o", -- the build panel
         errors = "e", -- quickfix list
         view = "v",

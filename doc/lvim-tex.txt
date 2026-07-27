@@ -763,8 +763,16 @@ bibliography is not reported as an empty bibtex entry.
                         (see |lvim-tex-selection|).
 :LvimTex stop           Stop this project's build.
 :LvimTex stop_all       Stop every running build.
-:LvimTex clean          Remove the auxiliary files (`latexmk -c`).
-:LvimTex clean full     Also remove the produced PDF (`latexmk -C`).
+:LvimTex clean          Remove the compile TARGET's auxiliary files
+                        (`latexmk -c`). The target is what `,ls` toggles —
+                        opening a file does not change it.
+:LvimTex clean full     Also remove its PDF (`latexmk -C`).
+:LvimTex clean this     The file in the BUFFER, whatever the target is; the
+                        target is not disturbed. `clean this full` for its PDF.
+:LvimTex clean all      Every `.tex` the project's include graph names — a book
+                        built chapter by chapter accumulates a set of artefacts
+                        per chapter. Never a directory glob: a chapter that is
+                        no longer included is left alone. `clean all full` too.
 :LvimTex main           Toggle the compile target: root ⇄ current subfile.
 :LvimTex errors         Open the quickfix list of the last build.
 :LvimTex info           Report root, target, builder, out dir, include and

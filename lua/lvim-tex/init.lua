@@ -446,7 +446,17 @@ local COMMANDS = {
         build.stop_all()
     end,
     clean = function(arg)
-        build.clean(0, arg == "full")
+        -- `:LvimTex clean [this|all] [full]` — the scope first, the depth second, either omitted.
+        local words = vim.split(arg or "", "%s+", { trimempty = true })
+        local scope, full = "target", false
+        for _, w in ipairs(words) do
+            if w == "this" or w == "all" then
+                scope = w
+            elseif w == "full" then
+                full = true
+            end
+        end
+        build.clean(0, { scope = scope, full = full })
     end,
     reverse = function()
         M.reverse()
@@ -552,6 +562,18 @@ local function attach_keys(buf)
     map(keys.view, function()
         M.view()
     end, "open the PDF viewer")
+    map(keys.clean_here, function()
+        build.clean(buf, { scope = "this" })
+    end, "clean this file's auxiliary files")
+    map(keys.clean_here_full, function()
+        build.clean(buf, { scope = "this", full = true })
+    end, "clean this file, including its PDF")
+    map(keys.clean_all, function()
+        build.clean(buf, { scope = "all" })
+    end, "clean every file in the project")
+    map(keys.clean_all_full, function()
+        build.clean(buf, { scope = "all", full = true })
+    end, "clean every file in the project, including the PDFs")
     map(keys.reverse, COMMANDS.reverse, "reverse search: jump to what the viewer is showing")
     map(keys.reload, COMMANDS.reload, "reload the project data")
     map(keys.conceal, function()
@@ -758,7 +780,7 @@ function M.setup(opts)
             local words = vim.split(vim.trim(line), "%s+")
             if #words > 2 or (#words == 2 and arg == "") then
                 local ARGS = {
-                    clean = { "full" },
+                    clean = { "full", "this", "all", "this full", "all full" },
                     view = { "close" },
                     toc = { "split", "float", "area", "bottom" },
                     conceal = vim.tbl_keys(config.conceal.groups),

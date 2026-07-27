@@ -114,8 +114,10 @@ require("lvim-tex").setup({})
 | `:'<,'>LvimTex selection` | Compile the selection as a standalone document |
 | `:LvimTex stop` | Stop this project's build |
 | `:LvimTex stop_all` | Stop every running build |
-| `:LvimTex clean` | Remove the auxiliary files (`latexmk -c`) |
-| `:LvimTex clean full` | Also remove the produced PDF (`latexmk -C`) |
+| `:LvimTex clean` | Remove the compile TARGET's auxiliary files (`latexmk -c`) |
+| `:LvimTex clean full` | Also remove its PDF (`latexmk -C`) |
+| `:LvimTex clean this` | The file in the buffer, whatever the target is (`full` too) |
+| `:LvimTex clean all` | Every `.tex` the project's include graph names (`full` too) |
 | `:LvimTex main` | Toggle the compile target: root document ⇄ the current subfile |
 | `:LvimTex errors` | Open the quickfix list of the last build |
 | `:LvimTex info` | Report root, target, builder, out dir, include/watch counts, and which rule produced each entry |
@@ -157,8 +159,12 @@ default `maplocalleader = ","`, `keys.build` reads `,ll`.
 | `<localleader>lr` | Reverse search: jump the cursor to what the viewer is showing |
 | `<localleader>lk` | Stop this build |
 | `<localleader>lK` | Stop every build |
-| `<localleader>lc` | Clean auxiliary files |
-| `<localleader>lC` | Clean everything |
+| `<localleader>lc` | Clean the compile target's auxiliary files |
+| `<localleader>lC` | …and its PDF |
+| `<localleader>lh` | Clean **here** — the file in the buffer, whatever the target is |
+| `<localleader>lH` | …and its PDF |
+| `<localleader>lp` | **Purge** the project — every file its include graph names |
+| `<localleader>lP` | …and their PDFs |
 | `<localleader>le` | Open the quickfix list |
 | `<localleader>ls` | Toggle the compile target |
 | `<localleader>li` | Project info |
@@ -759,8 +765,12 @@ require("lvim-tex").setup({
         continuous = "a",
         stop = "k",
         stop_all = "K",
-        clean = "c",
-        clean_full = "C",
+        clean = "c", -- the compile TARGET's auxiliary files
+        clean_full = "C", -- …and its PDF
+        clean_here = "h", -- the file in the buffer, whatever the target is
+        clean_here_full = "H",
+        clean_all = "p", -- every .tex the project's include graph names
+        clean_all_full = "P",
         output = "o",
         errors = "e",
         view = "v",

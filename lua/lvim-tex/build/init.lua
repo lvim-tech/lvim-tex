@@ -541,45 +541,107 @@ function M.stop_all()
     return count
 end
 
---- Remove the build's auxiliary files (`full` also removes the produced PDF).
+--- Remove build artefacts. WHAT is removed is a SCOPE, and the default is the compile target.
+---
+--- "target" is the plugin's own unit everywhere else — a build produces the target's artefacts, so
+--- removing them is the symmetric act, and `,ls` is what changes it. But that leaves two things a
+--- multi-file document actually needs and could not express: the chapter you happen to be LOOKING at
+--- (without disturbing the target the rest of the session depends on), and the whole project at once
+--- — a book built chapter by chapter accumulates a set of artefacts per chapter, and reaching them
+--- one at a time through the target toggle is not a workflow.
+---
+--- Each file is cleaned by the BUILDER, never by deleting names that match a pattern: latexmk knows
+--- what it produced, including under an out-dir, and a pattern would eventually take something the
+--- author wrote.
 ---@param buf integer?
----@param full boolean?
+---@param opts { full: boolean?, scope: ("target"|"this"|"all")? }|boolean?  a boolean is `full`,
+---   for the callers that predate scopes
 ---@return boolean started
-function M.clean(buf, full)
+function M.clean(buf, opts)
+    if type(opts) ~= "table" then
+        opts = { full = opts == true, scope = "target" }
+    end
+    local full = opts.full == true
+    local scope = opts.scope or "target"
     local root = root_mod.of(buf)
     if not root then
         return false
     end
-    -- Clean what is actually BUILT, which is the toggled target and not necessarily the root: with
-    -- `,ls` on a subfile and artefacts beside the source, the subfile's `.aux`/`.log`/`.pdf` sit next
-    -- to the subfile, and cleaning the root's leaves them exactly where they were. Resolved the same
-    -- way `start()` resolves it, including the engine — a `% !TEX program` directive lives in the
-    -- preamble, so the project answers for a subfile that has none.
-    local target = state.project(root).target or root
-    local name = root_mod.program_for(root, target) or config.builder
-    local mod = backend(name)
-    if not mod or not mod.clean_argv then
-        notify(("builder %q cannot clean"):format(name), vim.log.levels.WARN)
+
+    --- Which files this scope names, in the order they are cleaned.
+    ---@return string[]
+    local function targets()
+        if scope == "this" then
+            local name = api.nvim_buf_get_name(buf or 0)
+            if name == "" then
+                return {}
+            end
+            return { fn.fnamemodify(name, ":p") }
+        end
+        if scope == "all" then
+            -- The include graph, so a chapter that is no longer referenced is left alone rather than
+            -- swept up by a directory glob: what the project builds is what the project may clean.
+            local list = {}
+            for _, path in ipairs(root_mod.graph(root) or { root }) do
+                if path:match("%.tex$") or path:match("%.ltx$") then
+                    list[#list + 1] = path
+                end
+            end
+            return list
+        end
+        return { state.project(root).target or root }
+    end
+
+    local list = targets()
+    if #list == 0 then
+        notify("nothing to clean here", vim.log.levels.WARN)
         return false
     end
-    local out_dir = root_mod.out_dir(root, target)
-    local argv = mod.clean_argv({
-        target = target,
-        out_dir = (out_dir ~= vim.fs.dirname(target)) and out_dir or nil,
-        full = full,
-    })
-    vim.system(argv, { cwd = mod.cwd({ target = target }), text = true }, function(result)
-        vim.schedule(function()
-            if result.code == 0 then
-                notify(("%s cleaned %s"):format(config.icons.ok, fn.fnamemodify(target, ":t")))
-            else
-                notify(
-                    ("%s clean failed: %s"):format(config.icons.fail, vim.trim(result.stderr or "")),
-                    vim.log.levels.WARN
-                )
-            end
+
+    local pending, failed = #list, 0
+    for _, target in ipairs(list) do
+        -- Resolved per file, exactly as `start()` does: a `% !TEX program` directive lives in a
+        -- preamble a subfile has none of, so the project answers for it.
+        local name = root_mod.program_for(root, target) or config.builder
+        local mod = backend(name)
+        if not mod or not mod.clean_argv then
+            notify(("builder %q cannot clean"):format(name), vim.log.levels.WARN)
+            return false
+        end
+        local out_dir = root_mod.out_dir(root, target)
+        local argv = mod.clean_argv({
+            target = target,
+            out_dir = (out_dir ~= vim.fs.dirname(target)) and out_dir or nil,
+            full = full,
+        })
+        vim.system(argv, { cwd = mod.cwd({ target = target }), text = true }, function(result)
+            vim.schedule(function()
+                if result.code ~= 0 then
+                    failed = failed + 1
+                    notify(
+                        ("%s clean failed for %s: %s"):format(
+                            config.icons.fail,
+                            fn.fnamemodify(target, ":t"),
+                            vim.trim(result.stderr or "")
+                        ),
+                        vim.log.levels.WARN
+                    )
+                end
+                pending = pending - 1
+                if pending == 0 and failed == 0 then
+                    -- One message for the whole scope: a book-sized `clean all` must not report per
+                    -- file, and naming what was cleaned is what tells the user the scope was the one
+                    -- they meant.
+                    notify(
+                        ("%s cleaned %s"):format(
+                            config.icons.ok,
+                            #list == 1 and fn.fnamemodify(list[1], ":t") or ("%d files"):format(#list)
+                        )
+                    )
+                end
+            end)
         end)
-    end)
+    end
     return true
 end
 
