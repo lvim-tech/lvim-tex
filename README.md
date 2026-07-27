@@ -109,6 +109,7 @@ require("lvim-tex").setup({})
 | `:LvimTex continuous` | Arm / disarm the save-driven rebuild loop for this project |
 | `:LvimTex output` | Open the build panel (facts, diagnostics by severity, raw output) |
 | `:LvimTex view` | Open the PDF viewer on this project's output |
+| `:LvimTex reverse` | Ask the viewer which page it shows and jump the cursor there |
 | `:LvimTex view close` | Close it |
 | `:'<,'>LvimTex selection` | Compile the selection as a standalone document |
 | `:LvimTex stop` | Stop this project's build |
@@ -153,6 +154,7 @@ default `maplocalleader = ","`, `keys.build` reads `,ll`.
 | `<localleader>lb` | Find a citation in the project |
 | `gf` | Jump into the include under the cursor (`<C-w>f`, `<C-w>gf` for splits) |
 | `<localleader>lv` | Open the PDF viewer and jump it to the cursor (forward search) |
+| `<localleader>lr` | Reverse search: jump the cursor to what the viewer is showing |
 | `<localleader>lk` | Stop this build |
 | `<localleader>lK` | Stop every build |
 | `<localleader>lc` | Clean auxiliary files |
@@ -178,7 +180,8 @@ Set any suffix to `false` to leave that key unmapped, or change `keys.prefix` to
   remove the PDF.
 - **arara** — runs the workflow the *document* declares in its own `% arara:` directives: the engine,
   the rerun count and the bibliography tool are chosen in the file, not here. arara has **no output
-  directory**, so set `out_dir = nil` while it is the builder — `:checkhealth` says so. A document with
+  directory**, and lvim-tex already builds beside the source for it; set `out_dir = false` to make
+  the rest of the project match — `:checkhealth` says so. A document with
   no directive fails, which is arara reporting that it had nothing to run.
 - **custom** — any command; the build lifecycle applies unchanged. It must leave `<jobname>.log` where
   lvim-tex looks or diagnostics stay empty.
@@ -406,7 +409,7 @@ The viewer is one interface with many implementations, and the build lifecycle t
 of what a viewer can DO rather than which one it is — `reload` is `auto` (the viewer watches the file
 itself), `push` (we tell it) or `none`; `status` says whether it can show our build state.
 
-The default, and the only one implemented in this version, is **lvim-preview's PDF page**: it is
+The default is **lvim-preview's PDF page**: it is
 already in the ecosystem, works on every platform, needs nothing installed, and is the only viewer
 that can render a build state. lvim-tex registers the PDF as an lvim-preview *artifact* before the
 first build, so the page can be opened immediately and says "building" instead of failing on a file
@@ -437,23 +440,81 @@ at the line TeX recorded rather than at each of them, and a blank line — types
 resolved to the nearest line that does put something on the page (downwards first) instead of being
 asked about directly, which would answer with whatever node happens to be closest, pages away.
 
+The link works in BOTH directions with the default viewer. `synctex.follow_back` moves the SOURCE
+when you scroll the PDF page: the page reports which point of which page is at the top of its
+viewport, `synctex edit` turns that into a file and a line, and the window already showing that file
+scrolls to it. Only our own page can do this — it is the only viewer that reports where its reader
+is — and it needs the same lvim-preview gate as ctrl-click inverse search
+(`artifact.allow_client_messages`).
+
+**Or ask, instead of being followed.** `,lr` (`:LvimTex reverse`) is the reverse of `,lv`: it asks the
+viewer which page it is showing and jumps the cursor there. One keystroke, no timers, no polling —
+and it works whether or not the automatic poll below is on, because that switch decides whether the
+editor follows *by itself*, and asking is always allowed. For every external viewer this is the
+finest reverse direction there is; ctrl-click answers "the source of THIS", `,lr` answers "the source
+of what I am looking at" without leaving the keyboard.
+
+**An external viewer can follow too, by the page.** Our own page is the only viewer that reports a
+POSITION; zathura and okular publish which PAGE they are showing and announce nothing when it
+changes, so `follow_back.poll` asks them on a timer and moves the source a page's worth when you flip
+one. It is off by default — coarse, and a whole-page jump is a surprising thing to opt into silently.
+
+**How precise it can be.** SyncTeX records one anchor per source LINE, and in prose that is usually
+one whole paragraph — so the reverse direction resolves to the paragraph you are reading, not to the
+sentence. Mid-page that is a few tens of PDF points; it cannot be sharpened by this plugin, because
+the data does not carry it. What the plugin does guarantee is that the answer is about the paragraph
+in front of you: a report whose resolved line turns out to sit on another page, or further than
+`follow_back.tolerance` from the point that produced it, is dropped rather than acted on.
+
+Three rules keep a two-way link usable rather than a fight, and they are the ones lvim-preview's
+markdown scroll link already established: it moves the **view and not the cursor** (scrolling is
+reading, not editing), it **never focuses or opens** a window — a file you are not looking at is not
+moved at all — and whoever moved the other side last **owns the link** for `follow_back.settle` ms,
+so the echo of our own forward search is dropped instead of bouncing back. That last one is why the
+two directions do not chase each other; it breaks the loop by construction rather than damping it.
+
 `synctex.follow_cursor` keeps the viewer on what you are editing: after the cursor has been still for
-`follow_debounce` ms, the page moves to the paragraph it sits in. It never opens a viewer — it only
+`follow_debounce` ms, the page moves to the paragraph it sits in. **A scroll counts as movement too**
+(`synctex.follow_scroll`): reading is scrolling, and a wheel, `CTRL-E`/`CTRL-Y` or `zz` moves the view
+while leaving the cursor exactly where it was — so a viewer that only ever answers the cursor sits
+still through the whole of it. A scroll is answered with the window CENTRE rather than the cursor,
+because the cursor is no longer where you are looking. It never opens a viewer — it only
 moves one that is already open — and it is silent when the PDF has no SyncTeX data for that file, so a
 buffer that was not part of the last build costs nothing. `synctex.forward_on_build` does the same once
 per successful build instead of per pause.
 
+**It also never takes the keyboard focus**, and that is what decides which viewers it can drive at all.
+A forward search you ASKED for (`,lv`) may raise the viewer's window — that is half of what you asked
+for. One sent automatically may not: being pulled out of the buffer a fraction of a second after every
+pause, with nothing on screen to explain it, is worse than not following. Some viewers can be told
+(okular's `--noraise`, sioyek's `--nofocus`, Skim's `displayline -g`) and some cannot — evince's D-Bus
+`SyncView` and Sumatra's `-forward-search` always present their window. So each viewer declares whether
+its forward search is `quiet` or `raises`, the cursor-follow drives only the quiet ones, and
+`:checkhealth lvim-tex` says which is which on your machine.
+
+zathura sits between the two, and that is why a viewer spec may override the declaration: its raise is
+a *setting* (`dbus-raise-window`, on by default), not a property of the binary. `viewer.zathura.forward
+= "quiet"` turns it off — over zathura's own `ExecuteCommand`, the one D-Bus call exempt from the
+raise — in the instance lvim-tex launched, leaving your zathurarc alone. The trade is all-or-nothing:
+after that no sync raises zathura, the explicit `,lv` included.
+
 Where it is automatic and where it is not:
 
-| viewer | forward | inverse | verified |
-| --- | --- | --- | --- |
-| preview (default) | yes | ctrl-click, once lvim-preview's `artifact.allow_client_messages` is on | against the running server |
-| zathura | yes, into the window we launched | automatic when we launch it | against the local binary |
-| okular | yes (`--unique`, `--noraise`) | automatic when we launch it | against the local binary |
-| sioyek | yes | automatic when we launch it | per its documentation; not installed here |
-| evince | over D-Bus | not claimed (its `SyncSource` signal needs a monitor process) | against the local binary |
-| Skim (macOS) | yes | a one-time setting in Skim's own preferences | per its documentation |
-| SumatraPDF (Windows) | yes | automatic when we launch it | per its documentation |
+| viewer | forward | follows the cursor | inverse | verified |
+| --- | --- | --- | --- | --- |
+| preview (default) | yes | yes | ctrl-click, once lvim-preview's `artifact.allow_client_messages` is on | against the running server |
+| zathura | yes, into the window we launched | only with `zathura = { forward = "quiet" }` — it raises its window otherwise | automatic when we launch it | against the local binary |
+| okular | yes (`--unique`, `--noraise`) | yes | automatic when we launch it | against the local binary |
+| sioyek | yes (`--reuse-window`, `--nofocus`) | yes | automatic when we launch it | its flags against a real binary; behaviour not yet watched |
+| evince | over D-Bus | no — `SyncView` always raises its window | not claimed (its `SyncSource` signal needs a monitor process) | against the local binary |
+| Skim (macOS) | yes (`displayline -g`) | yes | a one-time setting in Skim's own preferences | per its documentation |
+| SumatraPDF (Windows) | yes | no — `-forward-search` always raises its window | automatic when we launch it | per its documentation |
+
+A SINGLE-INSTANCE viewer (okular, sioyek) needs one more thing to follow anything: knowing that its
+window is still open. It cannot be answered by the process we spawned, because a second invocation
+hands its file to the running window and exits within a fraction of a second — so for okular the
+question goes to the session bus (`org.kde.okular` → `currentDocument()`), asked behind a short cache
+so it stays free on every cursor pause.
 
 `:checkhealth lvim-tex` prints that matrix for YOUR machine — including the exact lines to paste
 where a manual step is unavoidable — and never reports an unproven module as ready.
@@ -606,18 +667,56 @@ require("lvim-tex").setup({
         inverse = true, -- let a click in the viewer move the cursor here
         forward_on_build = false, -- forward-search after every successful build
         follow_cursor = false, -- keep the viewer on the paragraph the cursor is in
+        follow_scroll = true, -- …and on what a SCROLL brought into view (only while follow_cursor)
         follow_debounce = 400, -- ms of stillness before that follow-up search is sent
+        -- The same link the other way: scrolling the PDF page moves the source to the text you are
+        -- looking at. Our own preview page only (the one viewer that reports where its reader is),
+        -- and it needs lvim-preview's `artifact.allow_client_messages`, as ctrl-click does.
+        follow_back = {
+            enabled = true,
+            settle = 300, -- ms one side owns the link after it moved the other
+            -- "center" matches what the page reports (the text at its viewport ANCHOR, its centre by
+            -- default — a page's top edge is margin, where SyncTeX has nothing to resolve).
+            place = "center", -- where the resolved line lands: "top" | "center"
+            -- PDF points the answer may be off before the report is thrown away: one extra
+            -- `synctex view` checks where the resolved line REALLY sits. 0 disables the check.
+            tolerance = 200,
+            -- The COARSE half, for a viewer that can only say which PAGE it is on (zathura, okular
+            -- — neither announces a page change, so it is a poll or nothing). Off by default: a
+            -- whole-page jump of the source on every page flip is opt-in.
+            poll = {
+                enabled = false,
+                interval = 1000, -- ms between reads (a read costs ~3 ms)
+                x = 300, -- where on the page to resolve, PDF points from its top-left —
+                y = 396, -- inside the text block of both A4 and letter, never a margin
+            },
+            move = "view", -- "view" scrolls the window; "cursor" takes the cursor there too
+        },
     },
     viewer = {
         enabled = true,
         name = "auto", -- auto | preview | zathura | sioyek | okular | evince | skim | sumatra
         priority = nil, -- nil = the per-OS default order, preview first
         open_on_start = true, -- open the viewer as a build starts
-        zathura = { bin = "zathura", args = {} },
+        -- Any viewer spec may carry `forward = "quiet" | "raises" | false` to OVERRIDE what its
+        -- module declares about taking the focus on a sync. zathura is why it exists: it presents its
+        -- window on every D-Bus command (`--synctex-forward` included) unless its own
+        -- `dbus-raise-window` is off, so it does not follow the cursor by default. Set "quiet" and
+        -- lvim-tex turns that option off in the window IT opens — your zathurarc is untouched — at the
+        -- cost that no sync raises zathura any more, `,lv` included.
+        -- Every viewer spec also takes `forward = "quiet" | "raises" | false`, overriding what its
+        -- module declares about taking the keyboard focus on a sync. Not shown as a default because
+        -- `nil` in a table literal stores nothing.
+        zathura = {
+            bin = "zathura",
+            args = {},
+            raise_retries = 16, -- how persistently `dbus-raise-window` is turned off after a launch …
+            raise_retry_ms = 250, -- … and how long between attempts (its bus name appears late)
+        },
         sioyek = { bin = "sioyek", args = {} },
         okular = { bin = "okular", args = {} },
         evince = { bin = "evince", args = {} },
-        skim = { displayline = "displayline" },
+        skim = { displayline = "displayline", args = {} },
         sumatra = { bin = "SumatraPDF.exe", args = {} },
     },
     conceal = {
@@ -665,7 +764,7 @@ require("lvim-tex").setup({
         output = "o",
         errors = "e",
         view = "v",
-        reverse = "r",
+        reverse = "r", -- jump to what the viewer is showing (the reverse of `view`)
         outline = "t",
         main = "s",
         info = "i",

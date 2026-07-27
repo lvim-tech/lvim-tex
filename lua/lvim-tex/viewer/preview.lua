@@ -42,8 +42,10 @@ local M = {}
 
 M.name = "preview"
 
----@type { inverse: boolean, reload: "auto"|"push"|"none", status: boolean }
-M.supports = { inverse = true, reload = "push", status = true }
+--- `forward = "quiet"`: the page is a websocket message to a browser tab that is already open —
+--- nothing is presented and no window manager is involved, so the cursor-follow may drive it.
+---@type { inverse: boolean, reload: "auto"|"push"|"none", status: boolean, forward: "quiet"|"raises"|false }
+M.supports = { inverse = true, reload = "push", status = true, forward = "quiet" }
 
 ---@type "live"|"docs"|"platform"|"experimental"
 M.verified = "live"
@@ -101,17 +103,32 @@ function M.open(ctx, opts)
         viewer = "pdf",
         title = ("%s · %s"):format(fn.fnamemodify(ctx.pdf, ":t"), fs.basename(fs.dirname(ctx.root))),
         watch = false,
+        -- The two shapes this producer understands, declared so the FRAMEWORK rejects everything
+        -- else before it reaches the handler below. The page is a browser and its frames are
+        -- untrusted; naming the contract is cheaper than defending against it here.
+        accepts = { "synctex_edit", "synctex_scroll" },
         -- INVERSE SEARCH. The page sends exactly one kind of frame, on ctrl-click, and only when
         -- lvim-preview's own `artifact.allow_client_messages` gate is open — that gate is the USER's
         -- to set, in lvim-preview's config, and health prints the line rather than this plugin
         -- reaching into another plugin's settings. Supplying the handler is our half of it.
+        --
+        -- The page sends TWO shapes now, and they mean opposite things. `synctex_edit` is a
+        -- ctrl-click: "take me to the source of THIS" — a jump, cursor and all. `synctex_scroll` is
+        -- the reader having scrolled: "the source of what I am now looking at" — a follow, which
+        -- moves the view and never the cursor, and which the link's ownership window can drop as an
+        -- echo of our own forward search. One handler, because the gate and the artifact are one.
         on_message = config.synctex.inverse and function(msg)
-            if type(msg) ~= "table" or msg.type ~= "synctex_edit" then
+            if type(msg) ~= "table" then
                 return
             end
             local page = math.floor(tonumber(msg.page) or 0)
-            if page > 0 then
+            if page <= 0 then
+                return
+            end
+            if msg.type == "synctex_edit" then
                 synctex.inverse(ctx.pdf, page, tonumber(msg.x) or 0, tonumber(msg.y) or 0)
+            elseif msg.type == "synctex_scroll" then
+                synctex.follow_back(ctx.pdf, page, tonumber(msg.x) or 0, tonumber(msg.y) or 0)
             end
         end or nil,
     })

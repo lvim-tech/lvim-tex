@@ -550,22 +550,28 @@ function M.clean(buf, full)
     if not root then
         return false
     end
-    local name = root_mod.program(root) or config.builder
+    -- Clean what is actually BUILT, which is the toggled target and not necessarily the root: with
+    -- `,ls` on a subfile and artefacts beside the source, the subfile's `.aux`/`.log`/`.pdf` sit next
+    -- to the subfile, and cleaning the root's leaves them exactly where they were. Resolved the same
+    -- way `start()` resolves it, including the engine — a `% !TEX program` directive lives in the
+    -- preamble, so the project answers for a subfile that has none.
+    local target = state.project(root).target or root
+    local name = root_mod.program_for(root, target) or config.builder
     local mod = backend(name)
     if not mod or not mod.clean_argv then
         notify(("builder %q cannot clean"):format(name), vim.log.levels.WARN)
         return false
     end
-    local out_dir = root_mod.out_dir(root)
+    local out_dir = root_mod.out_dir(root, target)
     local argv = mod.clean_argv({
-        target = root,
-        out_dir = (out_dir ~= vim.fs.dirname(root)) and out_dir or nil,
+        target = target,
+        out_dir = (out_dir ~= vim.fs.dirname(target)) and out_dir or nil,
         full = full,
     })
-    vim.system(argv, { cwd = mod.cwd({ target = root }), text = true }, function(result)
+    vim.system(argv, { cwd = mod.cwd({ target = target }), text = true }, function(result)
         vim.schedule(function()
             if result.code == 0 then
-                notify(("%s cleaned %s"):format(config.icons.ok, fn.fnamemodify(root, ":t")))
+                notify(("%s cleaned %s"):format(config.icons.ok, fn.fnamemodify(target, ":t")))
             else
                 notify(
                     ("%s clean failed: %s"):format(config.icons.fail, vim.trim(result.stderr or "")),

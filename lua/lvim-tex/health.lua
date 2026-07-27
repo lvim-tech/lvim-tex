@@ -14,6 +14,7 @@ local root_mod = require("lvim-tex.root")
 local rules = require("lvim-tex.log.rules")
 local viewer = require("lvim-tex.viewer")
 local synctex = require("lvim-tex.synctex")
+local state = require("lvim-tex.state")
 
 local api = vim.api
 local fn = vim.fn
@@ -63,7 +64,7 @@ local function check_builder(health)
                 name,
                 config.out_dir
             ),
-            { "set out_dir = nil while this builder is active, so the log, the PDF and forward search agree" }
+            { "lvim-tex already builds beside the source for it; set out_dir = false so the project agrees" }
         )
     end
     if supports.clean == "all" then
@@ -258,6 +259,30 @@ local function check_viewers(health)
         health.error(err or "no viewer available")
     end
 
+    -- THE TRAP WORTH NAMING. The follow only ever moves a viewer showing THIS project's PDF, and for
+    -- a single-instance viewer that is decided by comparing the document on screen with the compile
+    -- target's PDF. Reading a chapter's PDF while the target is still the root is therefore a state
+    -- in which everything is configured correctly and nothing follows — indistinguishable, from the
+    -- outside, from a broken link. `,ls` (toggle the compile target) is what aligns them.
+    if chosen and chosen.supports.status ~= true then
+        local buf = tex_buffer()
+        local root = buf and root_mod.of(buf) or nil
+        if root then
+            local target = state.project(root).target or root
+            local pdf = root_mod.pdf(root, target)
+            health.info(("the follow tracks %s — the compile target's PDF"):format(fn.fnamemodify(pdf, ":~")))
+            if target ~= root then
+                health.info(
+                    ("compile target is the subfile %s (`,ls` toggles it)"):format(fn.fnamemodify(target, ":t"))
+                )
+            else
+                health.info(
+                    "a viewer showing a DIFFERENT document will not follow — `,ls` to compile the file you read"
+                )
+            end
+        end
+    end
+
     -- Three states must stay distinguishable: not implemented here, implemented but unproven on this
     -- platform, and proven. Collapsing them into ok/not-ok is what makes a viewer story untrustworthy.
     ---@type table<string, string>
@@ -271,16 +296,39 @@ local function check_viewers(health)
         if not row.implemented then
             health.info(("%s — planned, not in this version"):format(row.name))
         elseif row.available then
-            local line = ("%s — available (reload: %s, inverse: %s) · %s"):format(
+            -- `forward` decides whether the CURSOR-FOLLOW may drive this viewer at all, so it belongs
+            -- in the same line as reload and inverse: "raises" is not a defect, it is the reason a
+            -- perfectly working viewer does not follow the cursor, and the user should read it here
+            -- rather than deduce it.
+            local FOLLOW = {
+                quiet = "follows the cursor",
+                raises = "explicit `,lv` only — its sync always takes the focus",
+            }
+            -- zathura's raise is a SETTING, so "raises" here is a choice the user can reverse; naming
+            -- the knob is the difference between a report and an explanation.
+            if row.name == "zathura" and row.forward == "raises" then
+                health.info(
+                    '  zathura: set `viewer = { zathura = { forward = "quiet" } }` to make it follow the cursor'
+                        .. " (lvim-tex then turns zathura's own `dbus-raise-window` off in the window it opens)"
+                )
+            end
+            local line = ("%s — available (reload: %s, inverse: %s, forward: %s) · %s"):format(
                 row.name,
                 row.reload,
                 row.inverse and "yes" or "no",
+                FOLLOW[row.forward] or "not supported",
                 PROVEN[row.verified] or row.verified
             )
             if row.verified == "live" then
                 health.ok(line)
             else
                 health.warn(line)
+            end
+            -- An INSTALLED viewer can still carry a caveat (a missing D-Bus helper, a renderer that
+            -- cannot load) — `available` returns it alongside true, and dropping it here is how a
+            -- viewer that opens an empty window gets reported as ready.
+            if row.detail then
+                health.warn(("  %s: %s"):format(row.name, row.detail))
             end
         else
             -- The caveat belongs on an ABSENT viewer too: it is what the user is deciding about when
@@ -322,11 +370,51 @@ local function check_synctex(health)
     -- health prints the line instead.
     local ok_preview, prev_config = pcall(require, "lvim-preview.config")
     if ok_preview and type(prev_config) == "table" then
+        local back = config.synctex.follow_back or {}
         if prev_config.artifact and prev_config.artifact.allow_client_messages then
             health.ok("lvim-preview accepts inbound messages — ctrl-click in the page jumps here")
+            -- The gate carries BOTH inbound shapes; which of them is acted on is this plugin's own
+            -- setting, so report the two separately rather than implying one answer covers both.
+            if back.enabled then
+                health.ok(
+                    ("scrolling the page moves the source with it (synctex.follow_back: %s, settle %dms)"):format(
+                        back.move == "cursor" and "cursor" or "view only",
+                        back.settle or 300
+                    )
+                )
+            else
+                health.info("synctex.follow_back.enabled = false — scrolling the page leaves the source alone")
+            end
+            -- The coarse half is a separate switch and a separate capability, so it is reported
+            -- separately: "the link is on" does not answer "will THIS viewer follow".
+            local poll = back.poll or {}
+            -- This section is about SyncTeX, not viewers, so it resolves its own — `chosen` belongs
+            -- to the viewer section and reaching for it here only looks like it works.
+            local driven = viewer.resolve()
+            if poll.enabled and back.enabled then
+                if driven and driven.supports.position == true then
+                    health.ok(
+                        ("%s is polled for its page every %dms — the source follows a page flip"):format(
+                            driven.name,
+                            math.max(100, tonumber(poll.interval) or 1000)
+                        )
+                    )
+                elseif driven then
+                    health.info(
+                        ("%s cannot report which page it is on — the page poll does nothing here"):format(driven.name)
+                    )
+                end
+            elseif driven and driven.supports.position == true and back.enabled then
+                health.info(
+                    ("%s could follow by the page — set `synctex.follow_back.poll.enabled = true`"):format(
+                        driven.name
+                    )
+                )
+            end
         else
-            health.warn("lvim-preview's inbound-message gate is closed — ctrl-click in the page does nothing", {
+            health.warn("lvim-preview's inbound-message gate is closed — the page cannot reach the editor", {
                 'add `artifact = { allow_client_messages = true }` to require("lvim-preview").setup()',
+                "it gates BOTH directions in: ctrl-click inverse search and the scroll link (synctex.follow_back)",
                 "it stays per-artifact: only a producer that registered a handler (this one) is delivered to",
             })
         end

@@ -55,27 +55,46 @@ local function release_follow()
     end
 end
 
---- Move the viewer to where the cursor is, after it has been still.
+--- Move the viewer to where the reader is, after they have been still.
 ---
---- Deliberately narrow: it never OPENS a viewer (that is `,lv`), it does nothing when none is open,
---- and it does nothing outside a TeX buffer that belongs to a project. A forward search costs a
---- `synctex` process, so it is debounced rather than sent per cursor move — and the timer is a single
---- shared one, because only the LAST position matters.
+--- TWO KINDS, because "where the reader is" has two answers and a scroll gives the other one. A
+--- CURSOR move is answered by the cursor; a SCROLL is answered by the window CENTRE, because the
+--- cursor did not move — Neovim keeps it in the window, so after CTRL-E it is simply wherever the
+--- view left it. Sending the cursor for a scroll was the whole of the bug: the event fired (when it
+--- fired at all), resolved the same source line as last time, and the viewer stayed put while the
+--- reader scrolled a page away.
+---
+--- The position is read when the TIMER FIRES, not when the event arrives: a burst of scrolls must
+--- land on where the view came to rest, and the last trigger of either kind wins the shared timer.
+---
+--- Deliberately narrow: it does nothing outside a TeX buffer that belongs to a project, and what it
+--- may do to a viewer at all — never open one, never take the focus from the buffer — is decided by
+--- `viewer.follow`. A forward search costs a `synctex` process, so it is debounced rather than sent
+--- per event.
+---@param kind "cursor"|"scroll"
 ---@return nil
-local function follow_cursor()
+local function schedule_follow(kind)
     if not config.synctex.follow_cursor then
         return
     end
-    -- No filetype check: the autocmd's own `*.tex`/`*.ltx`/`*.bib` pattern is the gate, and a second
-    -- one on `&filetype` would make this unprovable outside a UI (detection is off under
-    -- `nvim --headless -u NONE`, so the guard could only ever be satisfied by hand).
-    local buf = api.nvim_get_current_buf()
-    local root = root_mod.of(buf)
-    if not root or not viewer.is_alive(root) then
+    if kind == "scroll" and config.synctex.follow_scroll == false then
         return
     end
-    local file = fn.fnamemodify(api.nvim_buf_get_name(buf), ":p")
-    local pos = api.nvim_win_get_cursor(0)
+    -- No filetype check: the file NAME is the gate (the `CursorMoved` autocmd expresses it as a
+    -- pattern; the `WinScrolled` one cannot — see setup() — so both end up here). A `&filetype`
+    -- guard would make this unprovable outside a UI, since detection is off under
+    -- `nvim --headless -u NONE`.
+    local buf = api.nvim_get_current_buf()
+    local name = api.nvim_buf_get_name(buf)
+    if not (name:match("%.tex$") or name:match("%.ltx$")) then
+        return
+    end
+    local root = root_mod.of(buf)
+    if not root then
+        return
+    end
+    local file = fn.fnamemodify(name, ":p")
+    local win = api.nvim_get_current_win()
     release_follow()
     local timer = vim.uv.new_timer()
     if not timer then
@@ -87,10 +106,32 @@ local function follow_cursor()
         0,
         vim.schedule_wrap(function()
             release_follow()
-            -- The viewer may have been closed while the timer ran; `forward` re-resolves it anyway,
-            -- and a failure here is silent BY DESIGN — a follow the user did not ask for must never
-            -- put a message on their screen.
-            viewer.forward(root, file, pos[1], pos[2] + 1, function() end)
+            if not api.nvim_win_is_valid(win) or api.nvim_win_get_buf(win) ~= buf then
+                return
+            end
+            local lnum, col
+            if kind == "scroll" then
+                -- The line at the middle ROW of the window, which is what `M` means — not the
+                -- numeric average of the first and last buffer line numbers. Under 'wrap' the two
+                -- differ: measured on a wrapped chapter, the average was 1–2 buffer lines off, and in
+                -- a book where one buffer line is a whole paragraph that aims the viewer up to a
+                -- paragraph away from what is actually mid-screen. The view is saved and restored
+                -- around it because `M` moves the cursor, and this must not.
+                api.nvim_win_call(win, function()
+                    local view = fn.winsaveview()
+                    vim.cmd("keepjumps normal! M")
+                    lnum = fn.line(".")
+                    fn.winrestview(view)
+                end)
+                col = 1
+            else
+                local pos = api.nvim_win_get_cursor(win)
+                lnum, col = pos[1], pos[2] + 1
+            end
+            -- `viewer.follow` owns every condition that makes an automatic sync safe — a viewer must
+            -- already be open, and it must be one that can be moved without taking the focus. Those
+            -- are facts about viewers, so the gate lives with them and not here.
+            viewer.follow(root, file, lnum, col)
         end)
     )
 end
@@ -190,6 +231,39 @@ function M.view()
     end)
 end
 
+--- REVERSE SEARCH: move the cursor to whatever the viewer is currently showing.
+---
+--- The manual counterpart of the page poll, and the honest reverse direction for a viewer that
+--- cannot report anything finer than a page — which is every external one. Ctrl-click in the viewer
+--- answers "the source of THIS"; this answers "the source of what I am looking at", without leaving
+--- the keyboard.
+---
+--- It works whether or not the automatic poll is on: that switch decides whether the editor follows
+--- BY ITSELF, and asking is always allowed.
+---@return nil
+function M.reverse()
+    local root = root_mod.of(0)
+    if not root then
+        notify("this buffer has no file on disk", vim.log.levels.WARN)
+        return
+    end
+    viewer.position(root, function(page, mod)
+        if not page then
+            local why = (not mod and "no viewer available")
+                or (mod.supports.position ~= true and ("%s cannot report which page it is showing"):format(mod.name))
+                or ("%s is not showing this project"):format(mod.name)
+            notify(why, vim.log.levels.WARN)
+            return
+        end
+        local pdf = root_mod.pdf(root, state.project(root).target)
+        require("lvim-tex.synctex").reverse_page(pdf, page, function(ok, err)
+            if not ok then
+                notify(err or "reverse search found nothing", vim.log.levels.WARN)
+            end
+        end)
+    end)
+end
+
 --- Close this project's viewer.
 ---@return nil
 function M.view_close()
@@ -205,6 +279,9 @@ end
 ---@return nil
 function M.reload()
     state.reset()
+    -- The sync link is state too, and outliving a reload is exactly wrong: its last exchanged line
+    -- would keep suppressing a valid follow until something else happened to change it.
+    require("lvim-tex.synctex").reset()
     -- The conceal maps are built from config + the shipped data; a reload re-reads the project AND
     -- whatever the user changed in the config since setup.
     conceal.refresh()
@@ -371,6 +448,9 @@ local COMMANDS = {
     clean = function(arg)
         build.clean(0, arg == "full")
     end,
+    reverse = function()
+        M.reverse()
+    end,
     main = function()
         M.toggle_main()
     end,
@@ -472,6 +552,7 @@ local function attach_keys(buf)
     map(keys.view, function()
         M.view()
     end, "open the PDF viewer")
+    map(keys.reverse, COMMANDS.reverse, "reverse search: jump to what the viewer is showing")
     map(keys.reload, COMMANDS.reload, "reload the project data")
     map(keys.conceal, function()
         conceal.toggle(buf)
@@ -546,6 +627,11 @@ function M.setup(opts)
 
     augroup = api.nvim_create_augroup("LvimTex", { clear = true })
 
+    -- A second setup() rebuilds every autocmd and timer; the sync link must start clean with them,
+    -- or an ownership record and a last-exchanged line from the previous configuration survive into
+    -- the new one and silently suppress the first follow that would otherwise have matched.
+    require("lvim-tex.synctex").reset()
+
     -- Conceal owns a WINDOW-scoped effect and therefore its own autocmds (a buffer shown in a second
     -- window is not something a buffer-attach hook can express), exactly as a panel registers itself
     -- with the shared cursor module.
@@ -596,15 +682,38 @@ function M.setup(opts)
         end,
     })
 
-    -- Follow the cursor with the viewer. `CursorMoved` alone would miss a jump made in normal mode
+    -- Follow the CURSOR with the viewer. `CursorMoved` alone would miss a jump made in normal mode
     -- that lands without moving (a `:` command), and `CursorHold` alone waits for 'updatetime' —
     -- which is the user's setting for something else entirely. Both feed the same debounce, so the
     -- cost is one forward search per pause however the cursor got there.
+    --
+    -- `.bib` is deliberately NOT in the pattern: a bibliography file is read by biber and never by
+    -- the engine, so it is in no PDF's SyncTeX data — every follow from one could only spawn a
+    -- `synctex` process in order to fail.
     api.nvim_create_autocmd({ "CursorMoved", "CursorHold" }, {
         group = augroup,
-        pattern = { "*.tex", "*.ltx", "*.bib" },
+        pattern = { "*.tex", "*.ltx" },
         desc = "lvim-tex: keep the viewer on the paragraph the cursor is in",
-        callback = follow_cursor,
+        callback = function()
+            schedule_follow("cursor")
+        end,
+    })
+
+    -- Follow the SCROLL as well, because reading is scrolling: a mouse wheel, CTRL-E/CTRL-Y or `zz`
+    -- moves the view a page away while the cursor stays exactly where it was, and a viewer that only
+    -- answers the cursor sits still through all of it. Measured in a TUI: CTRL-E raises `WinScrolled`
+    -- and NEITHER `CursorMoved` nor `CursorHold`, so this is a second event or nothing.
+    --
+    -- REGISTERED WITHOUT A PATTERN on purpose. `WinScrolled` matches its pattern against the WINDOW
+    -- ID, not the file name, so `pattern = "*.tex"` (or any path) matches nothing at all and the
+    -- autocmd silently never fires — measured: plain 2 firings, file-pattern 0, glob 0. The gate that
+    -- the pattern would have expressed lives inside `schedule_follow` instead.
+    api.nvim_create_autocmd("WinScrolled", {
+        group = augroup,
+        desc = "lvim-tex: keep the viewer on the part of the document being read",
+        callback = function()
+            schedule_follow("scroll")
+        end,
     })
 
     -- A magic `% !TEX root` comment can be added or changed at any time, and the root it names

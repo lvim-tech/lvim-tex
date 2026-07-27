@@ -38,11 +38,31 @@
 ---@field ignore   string[]  Lua patterns; a matching message is dropped entirely
 ---@field rules    table[]   EXTRA log rules appended after the shipped set (see lvim-tex.log)
 
+---@class LvimTexViewerSpec              one viewer's own settings; every viewer takes these
+---@field bin         string?    the executable (Skim names its helper `displayline` instead)
+---@field displayline string?    Skim only — its own forward-search helper
+---@field args        string[]   extra arguments, passed through verbatim on every invocation
+---@field forward     ("quiet"|"raises"|false)?  OVERRIDE what the module declares about taking the
+---   keyboard focus on a sync. Applies to ANY viewer, and exists for the one thing the plugin cannot
+---   detect: a viewer whose quietness is its own SETTING rather than a property of its binary.
+---   zathura is that case (see `viewer.zathura`); nil leaves the module's declaration alone.
+
+---@class LvimTexZathuraSpec : LvimTexViewerSpec
+---@field raise_retries  integer  how persistently a just-launched zathura is asked to stop raising
+---@field raise_retry_ms integer  ms between those attempts (its bus name appears late)
+
 ---@class LvimTexViewerConfig
 ---@field enabled       boolean   Drive a viewer at all (false = builds only)
 ---@field name          string    "auto", or one viewer name — a named one is never substituted
 ---@field priority      string[]? Order tried when `name = "auto"`; nil = the per-OS default list
 ---@field open_on_start boolean   Open the viewer as a build starts (external ones wait for a PDF)
+---@field preview  LvimTexViewerSpec?
+---@field zathura  LvimTexZathuraSpec
+---@field sioyek   LvimTexViewerSpec
+---@field okular   LvimTexViewerSpec
+---@field evince   LvimTexViewerSpec
+---@field skim     LvimTexViewerSpec
+---@field sumatra  LvimTexViewerSpec
 
 ---@class LvimTexOutlineConfig
 ---@field layout        "split"|"float"|"area"|"bottom"  How the TOC opens ("split" = a persistent dock)
@@ -66,7 +86,23 @@
 ---@field inverse          boolean  Accept inverse-search requests from a viewer
 ---@field forward_on_build boolean  Forward-search to the cursor after every successful build
 ---@field follow_cursor    boolean  Keep the viewer on the paragraph the cursor is in, as it moves
+---@field follow_scroll    boolean  …and on the part of the document a SCROLL brought into view
 ---@field follow_debounce  integer  ms of stillness before a follow-up forward search is sent
+---@field follow_back      LvimTexFollowBackConfig  the SAME link the other way round
+
+---@class LvimTexFollowBackConfig       scrolling the PDF page moves the source with it
+---@field enabled boolean               off with the viewer's inbound gate closed either way
+---@field settle  integer               ms one side owns the link after it moved the other
+---@field place   "top"|"center"        where the resolved line lands in the window
+---@field move    "view"|"cursor"       scroll the window, or take the cursor there too
+---@field tolerance number              PDF points the answer may be off before it is dropped (0 = off)
+---@field poll      LvimTexFollowPollConfig  page-granular polling of a viewer that can only answer in pages
+
+---@class LvimTexFollowPollConfig
+---@field enabled  boolean  off by default — a whole-page source jump per page flip is opt-in
+---@field interval integer  ms between reads of the viewer's current page
+---@field x        number   where on the page to resolve, PDF points from its top-left …
+---@field y        number   … deliberately inside the text block, never a margin
 
 ---@class LvimTexConcealConfig
 ---@field enabled   boolean                  Conceal is on for a TeX buffer as soon as it is opened
@@ -311,11 +347,25 @@ return {
         -- Open the viewer as a build starts (our preview page shows "building" over the last render;
         -- an external viewer waits until there is a PDF to show).
         open_on_start = true,
-        zathura = { bin = "zathura", args = {} },
+        -- Per viewer: its binary and any arguments you want passed through. EVERY one of these also
+        -- takes `forward = "quiet" | "raises" | false`, which overrides what that viewer's module
+        -- declares about taking the keyboard focus on a sync — see `LvimTexViewerSpec`. It is not
+        -- written out below because `nil` in a table literal stores nothing: the place to state that
+        -- default is the type, not a line of code that does not run.
+        --
+        -- zathura carries two settings of its OWN because it has a mechanism no other viewer has: it
+        -- presents its window on every D-Bus command — `--synctex-forward` included — unless its
+        -- `dbus-raise-window` option is off, so `forward = "quiet"` makes lvim-tex turn that option
+        -- off in the instance IT launched (over zathura's `ExecuteCommand`, the one call exempt from
+        -- the raise; your zathurarc is untouched). Its bus name appears a few hundred ms after the
+        -- process and is not activatable, so that request is retried rather than awaited — which is
+        -- what these two govern.
+        zathura = { bin = "zathura", args = {}, raise_retries = 16, raise_retry_ms = 250 },
         sioyek = { bin = "sioyek", args = {} },
         okular = { bin = "okular", args = {} },
         evince = { bin = "evince", args = {} },
-        skim = { displayline = "displayline" },
+        -- Skim drives its viewer through a helper rather than the application binary.
+        skim = { displayline = "displayline", args = {} },
         sumatra = { bin = "SumatraPDF.exe", args = {} },
     },
 
@@ -337,7 +387,63 @@ return {
         -- Debounced rather than per-move on purpose: each follow is a `synctex` process, and typing
         -- through a paragraph would otherwise spawn one per keystroke.
         follow_cursor = false,
+        -- Reading is scrolling, so a scroll counts as movement too: a wheel, CTRL-E/CTRL-Y or `zz`
+        -- moves the view while the cursor stays put, and a viewer that only ever answers the cursor
+        -- sits still through the whole of it. A scroll is answered with the WINDOW CENTRE, since the
+        -- cursor is no longer where the reader is looking. Only meaningful while `follow_cursor` is
+        -- on — it is the master switch for following at all; this one says whether the scroll half
+        -- of "where the reader is" counts.
+        follow_scroll = true,
         follow_debounce = 400,
+        -- The same link the other way: scrolling the PDF page moves the SOURCE to the text you are
+        -- looking at. Only our own preview page can do it — it is the only viewer that reports where
+        -- its reader is — and only while lvim-preview's `artifact.allow_client_messages` gate is
+        -- open, the same one ctrl-click inverse search needs.
+        --
+        -- Three rules, the same ones the markdown/org scroll link obeys, because they are what makes
+        -- a two-way link usable rather than a fight: it moves the VIEW and not the cursor (scrolling
+        -- is reading, not editing), it never focuses or opens a window — a file that is not on
+        -- screen is simply not moved — and whoever moved the other side last OWNS the link for
+        -- `settle` ms, so the echo of our own forward search is dropped instead of bouncing back.
+        follow_back = {
+            enabled = true,
+            settle = 300,
+            -- "center", to match what the page reports: it answers with the text at its viewport
+            -- ANCHOR (its centre by default, because a page's top edge is margin), so putting that
+            -- line at the top of the window would offset the two views by half a screen every time.
+            -- Centre ↔ centre makes the round trip a fixed point.
+            place = "center",
+            move = "view",
+            -- How far, in PDF points, the reported position may be from where the resolved line
+            -- ACTUALLY sits before the report is thrown away.
+            --
+            -- A page's margins carry no text, so a lookup there resolves to whatever record is
+            -- nearest by SyncTeX's own metric — routinely a paragraph at the other end of the page.
+            -- The check is one extra `synctex view` on the answer: if that line's real box is on
+            -- another page, or further than this from the point that produced it, the answer is not
+            -- about what the reader is looking at. Measured on a real book, legitimate errors are
+            -- ≤ 41 pt and the failure mode is ≥ 548 pt, so 200 leaves a 5× margin on either side.
+            -- 0 disables the check (one fewer process per report).
+            tolerance = 200,
+            -- POLLING a viewer that can only say WHICH PAGE it is on (zathura, okular). Off by
+            -- default: a whole-page jump of the source on every page flip is useful for reading
+            -- along, but surprising as a default — and only our own preview page can do the fine
+            -- link, so this is the coarse alternative rather than an addition to it.
+            --
+            -- It has to be a poll: neither viewer emits any signal when the page changes (zathura's
+            -- interface has exactly one signal, for ctrl-click), so there is nothing to subscribe
+            -- to. A read costs ~3 ms, which at this interval is noise.
+            poll = {
+                enabled = false,
+                interval = 1000,
+                -- Where ON the page to ask, in PDF points from its top-left. A page's margins carry
+                -- no text — a lookup there resolves to whatever record is nearest, routinely the
+                -- paragraph broken across the page break — so the point is deliberately INSIDE the
+                -- text block. The defaults sit inside it for both A4 (595×842) and letter (612×792).
+                x = 300,
+                y = 396,
+            },
+        },
     },
 
     -- Conceal — the source rendered as the maths it means, drawn from the parse tree onto the VISIBLE
@@ -423,7 +529,9 @@ return {
         output = "o", -- the build panel
         errors = "e", -- quickfix list
         view = "v",
-        reverse = "r", -- inverse search from the viewer's position
+        -- The reverse of `view`: ask the viewer which page it is showing and jump there. The honest
+        -- reverse direction for every viewer that cannot report anything finer than a page.
+        reverse = "r",
         outline = "t", -- TOC panel
         main = "s", -- toggle the compile target root ⇄ current subfile
         info = "i",

@@ -498,6 +498,9 @@ addresses it by what a viewer can DO, never by which one it is:
     reload = "none"   it cannot reload; the user re-opens it (health says so)
     status            it can show OUR build state over the last render
     inverse           a click in it can reach the editor (a later phase)
+    forward "quiet"   it can be moved to a position WITHOUT taking the focus
+    forward "raises"  moving it always presents its window
+    forward false     it cannot be moved at all
 
 DEFAULT VIEWER  lvim-preview's PDF page — already in the ecosystem, on every
                 platform, nothing to install, and the only viewer that can
@@ -534,6 +537,41 @@ OPENING         `viewer.open_on_start` opens the viewer as a build starts, for
                 until there is a PDF worth opening. `:LvimTex view` opens it at
                 any time and never builds first.
 
+                                                    *lvim-tex-viewer-liveness*
+LIVENESS        Whether a viewer is still on screen decides whether the
+                cursor-follow may move it, and for a SINGLE-INSTANCE viewer it
+                cannot be answered by the process we spawned: a second
+                invocation hands its file to the running window and exits
+                within a fraction of a second, leaving nothing to track. okular
+                is therefore asked over the session bus — `org.kde.okular`,
+                `/okular`, `currentDocument()` — behind a short cache, so the
+                question stays free to ask on every cursor pause. It compares
+                the DOCUMENT, not merely "okular is running": when you have
+                tabbed away to something else, a follow you never asked for
+                must not drag the tab back.
+
+                                                     *lvim-tex-viewer-focus*
+FOCUS           An automatic forward search must never take the keyboard. Some
+                viewers can be told (okular `--noraise`, sioyek `--nofocus`,
+                Skim `displayline -g`) and some cannot — evince's `SyncView`
+                and Sumatra's `-forward-search` present their window every
+                time. Each viewer declares which it is, `synctex.follow_cursor`
+                drives only the quiet ones, and the explicit `:LvimTex view`
+                drives all of them (there the raise is the point).
+
+                A viewer SPEC may override that declaration with
+                `forward = "quiet" | "raises" | false`, for the case the plugin
+                cannot detect: a viewer whose quietness is its own SETTING.
+                zathura is that case — it presents its window on every D-Bus
+                command (`--synctex-forward` becomes `SynctexView`) unless its
+                `dbus-raise-window` option is off, so it does not follow the
+                cursor by default. `viewer.zathura.forward = "quiet"` turns
+                that option off in the instance lvim-tex launched, over
+                zathura's own `ExecuteCommand` — the one D-Bus call exempt from
+                the raise — leaving your zathurarc untouched. The trade is
+                all-or-nothing: no sync raises zathura afterwards, `:LvimTex
+                view` included.
+
 ==============================================================================
 6b. SYNCTEX                                                   *lvim-tex-synctex*
 
@@ -569,6 +607,12 @@ FORWARD         `:LvimTex view` (`<localleader>lv`) opens the viewer and puts
                 after every successful build, so the viewer follows what you
                 are editing with no keystroke.
 
+                A SCROLL counts as movement too (`synctex.follow_scroll`):
+                a wheel, CTRL-E/CTRL-Y or `zz` moves the view while the cursor
+                stays put, so a viewer answering only the cursor sits still
+                through the whole of it. A scroll is answered with the WINDOW
+                CENTRE — the cursor is no longer where you are looking.
+
                 `synctex.follow_cursor` does it continuously: after the cursor
                 has been still for `follow_debounce` ms the page moves to the
                 paragraph it sits in. It never OPENS a viewer — it only moves
@@ -578,6 +622,58 @@ FORWARD         `:LvimTex view` (`<localleader>lv`) opens the viewer and puts
                 each follow is a `synctex` process.
 
                                                       *lvim-tex-inverse-search*
+                                                    *lvim-tex-follow-back*
+FOLLOW BACK     The same link the other way: scrolling the PDF page moves the
+                SOURCE to the text you are looking at. Only the default page
+                can do it — it is the only viewer that reports where its reader
+                is. The page sends the point at the top of its viewport,
+                `synctex edit` turns that into a file and a line, and the
+                window already showing that file scrolls to it.
+
+                Needs lvim-preview's `artifact.allow_client_messages`, the same
+                gate as ctrl-click; `synctex.follow_back.enabled` then decides
+                whether the frames are acted on.
+
+                HOW PRECISE. SyncTeX records one anchor per source LINE,
+                which in prose is usually a whole paragraph — so this
+                direction resolves to the paragraph being read, not the
+                sentence. That is the data's granularity, not a defect. A
+                report whose resolved line turns out to be on another page, or
+                further than `follow_back.tolerance` PDF points from the point
+                that produced it, is DROPPED rather than acted on (a page's
+                margins carry no text, so a lookup there would otherwise
+                resolve to an arbitrary paragraph).
+
+                                                       *lvim-tex-reverse*
+ASKING          `:LvimTex reverse` (`<localleader>lr`) is the reverse of `,lv`:
+                it asks the viewer which page it is showing and JUMPS the
+                cursor there — a command, so it moves the cursor and says so
+                when it cannot, unlike the silent follow below. It ignores
+                `follow_back.poll.enabled`: that switch decides whether the
+                editor follows by ITSELF; asking is always allowed.
+
+                BY THE PAGE, for an external viewer. Only the default page
+                reports a POSITION. zathura publishes `pagenumber` and okular
+                answers `currentPage()`, and NEITHER emits any signal when it
+                changes — zathura's whole D-Bus interface carries one signal,
+                for ctrl-click. So `follow_back.poll` asks on a timer (a read
+                costs ~3 ms) and the source moves a page's worth when you flip
+                a page, nothing in between. Off by default.
+
+                The query point (`poll.x` / `poll.y`) sits INSIDE the text
+                block on purpose: a page's margins carry no text, so a lookup
+                there resolves to whatever record is nearest.
+
+                Three rules make a two-way link usable instead of a fight:
+                  * MOVE THE VIEW, NOT THE CURSOR (`follow_back.move`).
+                    Scrolling is reading, not editing.
+                  * NEVER FOCUS OR OPEN a window. A file you are not looking at
+                    is not moved at all.
+                  * OWNERSHIP. Whoever moved the other side last owns the link
+                    for `follow_back.settle` ms, so the echo of our own forward
+                    search is dropped rather than answered. The loop is broken
+                    by construction, not damped.
+
 INVERSE         A click in the viewer moving the cursor here. It needs the
                 viewer to be able to REACH this Neovim, and it already can:
                 `v:servername` names the socket, so the launch command embeds

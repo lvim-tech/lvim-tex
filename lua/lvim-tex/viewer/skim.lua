@@ -21,8 +21,10 @@ local M = {}
 
 M.name = "skim"
 
----@type { inverse: boolean, reload: "auto"|"push"|"none", status: boolean }
-M.supports = { inverse = true, reload = "auto", status = false }
+--- `forward = "quiet"`: `displayline -g` performs the jump with Skim left in the background, so the
+--- cursor-follow may drive it.
+---@type { inverse: boolean, reload: "auto"|"push"|"none", status: boolean, forward: "quiet"|"raises"|false }
+M.supports = { inverse = true, reload = "auto", status = false, forward = "quiet" }
 
 ---@type "live"|"docs"|"platform"|"experimental"
 M.verified = "platform"
@@ -72,7 +74,10 @@ end
 ---@return boolean
 function M.forward(ctx, target)
     local spec = external.spec(M.name)
-    local argv = external.extend({ spec.displayline, "-r" }, spec.args)
+    -- `-r` picks up a rebuilt PDF, `-g` leaves Skim in the background: the cursor-follow sends one of
+    -- these every time the cursor settles, and pulling the editor out of the front each time is not
+    -- what following means.
+    local argv = external.extend({ spec.displayline, "-r", "-g" }, spec.args)
     vim.list_extend(argv, { tostring(target.line), ctx.pdf, target.file })
     return external.tell(argv, vim.fs.dirname(ctx.root))
 end

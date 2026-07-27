@@ -20,8 +20,11 @@ local M = {}
 
 M.name = "sumatra"
 
----@type { inverse: boolean, reload: "auto"|"push"|"none", status: boolean }
-M.supports = { inverse = true, reload = "auto", status = false }
+--- `forward = "raises"`: `-forward-search` brings the Sumatra window to the front and its command
+--- line offers no way to ask otherwise, so the cursor-follow leaves it alone and only the explicit
+--- `,lv` syncs it.
+---@type { inverse: boolean, reload: "auto"|"push"|"none", status: boolean, forward: "quiet"|"raises"|false }
+M.supports = { inverse = true, reload = "auto", status = false, forward = "raises" }
 
 ---@type "live"|"docs"|"platform"|"experimental"
 M.verified = "platform"
