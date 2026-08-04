@@ -511,24 +511,24 @@ function M.bib_entries(root)
                 for node in tree:root():iter_children() do
                     if node:type() == "entry" then
                         local row = node:range()
-                        local record = { key = "", type = "", file = path, lnum = row + 1, fields = {} }
+                        local entry = { key = "", type = "", file = path, lnum = row + 1, fields = {} }
                         for child in node:iter_children() do
                             local kind = child:type()
                             if kind == "entry_type" then
-                                record.type = vim.treesitter.get_node_text(child, src):gsub("^@", ""):lower()
+                                entry.type = vim.treesitter.get_node_text(child, src):gsub("^@", ""):lower()
                             elseif kind == "key_brace" then
-                                record.key = vim.trim(vim.treesitter.get_node_text(child, src))
+                                entry.key = vim.trim(vim.treesitter.get_node_text(child, src))
                             elseif kind == "field" then
                                 local name = first_child(child, { identifier = true })
                                 local value = first_child(child, { value = true })
                                 if name then
                                     local field = vim.treesitter.get_node_text(name, src):lower()
-                                    record.fields[field] = group_text(value, src):gsub('^"(.*)"$', "%1")
+                                    entry.fields[field] = group_text(value, src):gsub('^"(.*)"$', "%1")
                                 end
                             end
                         end
-                        if record.key ~= "" then
-                            out[#out + 1] = record
+                        if entry.key ~= "" then
+                            out[#out + 1] = entry
                         end
                     end
                 end

@@ -119,7 +119,7 @@ function M.jump()
     end
     if not pair or not side then
         -- `normal!` — the built-in behaviour, never this mapping again.
-        pcall(vim.cmd, "normal! %")
+        pcall(vim.cmd.normal, { bang = true, args = { "%" } })
         return false
     end
     local target = side == "open" and pair.close or pair.open
@@ -174,12 +174,16 @@ end
 ---@param on boolean?  nil toggles
 ---@return boolean  the new state
 function M.toggle_highlight(on)
+    ---@type boolean
+    local enabled
     if on == nil then
-        on = not config.matchparen.enabled
+        enabled = not config.matchparen.enabled
+    else
+        enabled = on
     end
-    config.matchparen.enabled = on
+    config.matchparen.enabled = enabled
     vim.cmd("redraw!")
-    return on
+    return enabled
 end
 
 --- Install the buffer-local `%` map and (once) the highlight provider. Idempotent per buffer.

@@ -64,8 +64,14 @@ local M = {}
 ---@field parser vim.treesitter.LanguageTree?                 cached latex parser for the buffer
 ---@field cache LvimTexConcealCache?                          memoised marks for the visible span
 
----@type integer?  namespace of the decoration provider AND of its ephemeral marks
-local ns = nil
+-- Namespace of the decoration provider AND of its ephemeral marks. Namespaces are interned BY NAME,
+-- so creating it here is the same id `setup` used to create on first call — and it is a constant,
+-- not state, which is why the install-once sentinel below is its own flag.
+---@type integer
+local ns = api.nvim_create_namespace("lvim-tex.conceal")
+
+---@type boolean  the decoration provider + autocmds are installed (setup is idempotent)
+local installed = false
 
 ---@type integer?  the plugin's conceal augroup
 local augroup = nil
@@ -940,10 +946,10 @@ end
 ---@return nil
 function M.setup()
     M.refresh()
-    if ns then
+    if installed then
         return
     end
-    ns = api.nvim_create_namespace("lvim-tex.conceal")
+    installed = true
     augroup = api.nvim_create_augroup("LvimTexConceal", { clear = true })
 
     api.nvim_set_decoration_provider(ns, {

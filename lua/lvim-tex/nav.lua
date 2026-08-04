@@ -259,10 +259,10 @@ end
 --- across two arguments; every other include names it in one. A multi-target include
 --- (`\addbibresource` may be given a comma list) is split by the caller.
 ---@param leaves string[]
----@param kind string
+---@param _ string  the include KIND — part of the caller's uniform signature, unused here
 ---@param node_type string
 ---@return string?
-local function join_spec(leaves, kind, node_type)
+local function join_spec(leaves, _, node_type)
     if #leaves == 0 then
         return nil
     end
@@ -429,7 +429,7 @@ function M.goto_file(opts)
     local hit = M.include_at(buf)
     if not hit then
         -- Not on an include: run Neovim's own `gf` (no remapping, so this cannot recurse into us).
-        pcall(vim.cmd, "normal! gf")
+        pcall(vim.cmd.normal, { bang = true, args = { "gf" } })
         return false
     end
     if hit.path then

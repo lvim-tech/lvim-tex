@@ -204,6 +204,7 @@ end
 ---@return LvimTexOpenConstruct?
 function M.close(win)
     win = (win == nil or win == 0) and api.nvim_get_current_win() or win
+    ---@cast win integer
     local buf = api.nvim_win_get_buf(win)
     local pos = api.nvim_win_get_cursor(win)
     local row, col = pos[1] - 1, pos[2]

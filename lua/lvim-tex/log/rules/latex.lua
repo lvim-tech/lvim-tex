@@ -8,7 +8,6 @@
 local S = vim.diagnostic.severity
 
 local fn = vim.fn
-local fs = vim.fs
 
 --- Where the DOCUMENT asks for `package`, so a fatal error raised inside that package's own `.sty`
 --- can be reported where the user can act on it.

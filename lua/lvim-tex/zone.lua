@@ -110,6 +110,7 @@ end
 ---@return boolean
 function M.cursor_in_math(win)
     win = (win == nil or win == 0) and vim.api.nvim_get_current_win() or win
+    ---@cast win integer
     local pos = vim.api.nvim_win_get_cursor(win)
     return M.in_math(vim.api.nvim_win_get_buf(win), pos[1] - 1, pos[2])
 end

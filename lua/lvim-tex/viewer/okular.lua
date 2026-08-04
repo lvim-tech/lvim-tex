@@ -163,10 +163,10 @@ end
 --- Which page is the reader on? The same coarse half of the link zathura answers, over the same bus
 --- okular already answers `currentDocument()` on — `currentPage()` is 1-BASED here (it is what the
 --- page indicator shows), so unlike zathura's property nothing is shifted.
----@param ctx LvimTexViewCtx
+---@param _ LvimTexViewCtx  the view context — part of the viewer interface, unused (the bus is global)
 ---@param cb fun(page: integer?): nil
 ---@return nil
-function M.position(ctx, cb)
+function M.position(_, cb)
     if fn.executable("gdbus") ~= 1 then
         return cb(nil)
     end
